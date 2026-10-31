@@ -41,7 +41,7 @@ def looks_like_cad(work):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("stl")
-    ap.add_argument("--mode", choices=["auto", "cad", "scan"], default="auto")
+    ap.add_argument("--mode", choices=["auto", "cad", "scan", "organic"], default="auto")
     ap.add_argument("--work")
     ap.add_argument("--max-turns", type=int, default=60)
     ap.add_argument("--no-swift", action="store_true", help="deterministic pass only (CAD meshes)")
@@ -79,9 +79,16 @@ def main():
         wb = Workbench(stl, work, page=a.live, on_link=on_link)
         wb.emit, wb.narrate = emit, True
         phase("analyze", "Reading the mesh")
-        analysis = wb.script("analyze")
+        n_tris = (stl.stat().st_size - 84) // 50
+        if n_tris > 400_000 and a.mode != "cad":
+            # shortcut: the exact-reading analyzer takes minutes on a scan this big and only feeds CAD meshes;
+            # a CAD export that dense would need --mode cad
+            analysis = f"{n_tris} triangles: a scan (exact reading skipped)\n\n\n"
+            mode = a.mode if a.mode != "auto" else "scan"
+        else:
+            analysis = wb.script("analyze")
+            mode = a.mode if a.mode != "auto" else ("cad" if looks_like_cad(work) else "scan")
         log(analysis)
-        mode = a.mode if a.mode != "auto" else ("cad" if looks_like_cad(work) else "scan")
         emit("mode", mode=mode)
         log(f"[run] mode: {mode}")
         report, failed, agent = "", True, None
@@ -103,6 +110,19 @@ def main():
                        f"{files} (main axis {wb.main_axis}, body \"{wb.body}\") and the validator says:\n{clip(agent.t_check(), 6000)}\n\n"
                        "Fix it until the validator passes.")
                 report, failed = agent.run(msg)
+        elif mode == "organic":
+            if not a.live:
+                wb.close()
+                wb = Workbench(stl, work, page=True, show_browser=not a.headless_browser)
+            wb.emit, wb.narrate = emit, True
+            phase("organic", "Repairing the scan into a solid")
+            log(wb.organic())
+            phase("check", "Validating the solid against the scan")
+            check = wb.check("organic")
+            log(check)
+            emit("validation", result=wb.last_validation, summary=check)
+            failed = wb.last_validation is None or wb.last_validation["verdict"] != "PASS"
+            report = "Organic route: islands removed, holes filled, reduced within tolerance, written as a faceted STEP solid."
         elif a.no_swift:
             report = "A real scan needs Swift: the exact-reading pass works on CAD-exported meshes only."
             log(f"[run] {report}")
@@ -119,10 +139,17 @@ def main():
             failed = failed or not agent.passed
 
         r = wb.last_validation
+        organic = bool(r and r.get("mode") == "organic")
+        if organic:
+            mode = "organic"
         phase("deliver", "Writing the STEP and the report")
-        if not failed and r and r["verdict"] == "PASS":
+        if not failed and r and r["verdict"] == "PASS" and organic:
+            status, step = "PASS", wb.organic_step
+        elif not failed and r and r["verdict"] == "PASS":
             log(wb.deliver(stl.stem))
             status, step = "PASS", work / f"{stl.stem}_CAD.step"
+        elif organic:
+            status, step = "NOT VALIDATED", wb.organic_step
         else:
             status, step = "NOT VALIDATED", work / "best_attempt_CAD.step"
         md = [f"# {stl.stem}: reverse-engineering report", "",

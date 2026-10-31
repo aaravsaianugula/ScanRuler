@@ -48,6 +48,12 @@ COMMON = [
     tool("finish", "Deliver. Refused unless the last check PASSED on the current model, or give_up is true.",
          {"report": {"type": "string"}, "give_up": {"type": "boolean"}}, ["report"]),
 ]
+SCAN_TOOLS = [
+    tool("organic_route", "For an organic part (figurine, sculpture, anatomy, a grip with no analytic faces): repair the scan "
+         "(islands off, holes filled), reduce it within tolerance and write it as a closed STEP solid. The validator then "
+         "judges that solid against the scan.", {"reason": {"type": "string"}, "max_triangles": {"type": "integer"},
+                                                  "tolerance": {"type": "number"}}, ["reason"]),
+]
 CAD_TOOLS = [
     tool("run_script", "Run a reverse-engineering script (analyze, frame, slabs, revolve, holes, blends, compare, helix, profile, rz, centers, two_way, slice, vslice) with CLI args.",
          {"name": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}}, ["name"]),
@@ -129,7 +135,7 @@ class Agent:
     def __init__(self, wb: Workbench, mode, log=print, max_turns=60, emit=None):
         self.wb, self.mode, self.log, self.max_turns = wb, mode, log, max_turns
         self.emit = emit or (lambda *a, **k: None)     # the desktop app's event stream
-        self.tools = COMMON + (CAD_TOOLS if mode == "cad" else [])
+        self.tools = COMMON + (CAD_TOOLS if mode == "cad" else SCAN_TOOLS)
         self.changes = 0            # bumped by anything that may change the model
         self.checked_at = -1        # self.changes when the last check ran
         self.passed = False
@@ -210,6 +216,14 @@ class Agent:
 
     def t_run_script(self, name, args=()):
         return self.wb.script(name, args)       # scripts write step files; the model changes on rebuild
+
+    def t_organic_route(self, reason, max_triangles=80000, tolerance=0.1):
+        self.log(f"[swift] organic route: {reason}")
+        self.emit("phase", phase="organic", label="Repairing the scan into a solid")
+        out = self.wb.organic(max_triangles, tolerance)
+        self.mode = "organic"            # the gate is now the organic solid against the scan
+        self.changes += 1
+        return out + "\n\n" + self.t_check()
 
     def t_rebuild(self, files):
         self.changes += 1

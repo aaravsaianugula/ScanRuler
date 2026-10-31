@@ -8,8 +8,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
+
 from mcp_client import REPO, ScanRulerMCP
-from validate import summary, validate
+from meshio_min import read_stl
+from validate import summary, validate, validate_organic
 
 SCRIPTS = REPO / "plugins" / "reverse" / "skills" / "cad-stl-reverse-engineering" / "scripts"
 ALLOWED = {"analyze", "frame", "slabs", "revolve", "holes", "blends", "compare", "helix", "profile", "rz", "centers",
@@ -162,6 +165,13 @@ class Workbench:
     def check(self, mode="cad", noise=None):
         """Export, analyze the model, run the independent validator. The one judge of done."""
         self.last_validation = None
+        if mode == "organic":
+            if not getattr(self, "reduced", None) or not self.reduced.exists():
+                return "no organic solid yet: run the organic route first"
+            r = validate_organic(self.input, self.repaired, self.reduced, self.organic_tol)
+            self.last_validation = r
+            (self.work / "validation.json").write_text(json.dumps(r, indent=1))
+            return summary(r)
         msg = self.export_model()
         if not msg.endswith("written"):
             return msg
@@ -180,6 +190,38 @@ class Workbench:
         self.last_validation = r
         (self.work / "validation.json").write_text(json.dumps(r, indent=1))
         return summary(r)
+
+    def organic(self, max_triangles=80000, tolerance=0.1):
+        """The organic route (a figurine, a sculpture — no analytic faces to rebuild): repair the scan
+        in ScanRuler's mesh tools (islands off, holes filled: small ones curved, the rest flat), reduce
+        it within tolerance, and write the reduced mesh as a closed STEP solid. Needs the page."""
+        from step_faceted import write_step
+        stem = self.stl.stem
+        self.repaired, self.reduced = self.work / f"{stem}_repaired.stl", self.work / f"{stem}_reduced.stl"
+        self.organic_step, self.organic_tol = self.work / f"{stem}_mesh_solid.step", tolerance
+        diag = float(np.linalg.norm(np.ptp(read_stl(self.input).reshape(-1, 3), axis=0)))
+        calls = [
+            {"tool": "mesh_remove_islands", "arguments": {}},
+            {"tool": "mesh_fill_holes", "arguments": {"patch": "curved"}},
+            {"tool": "mesh_fill_holes", "arguments": {"patch": "flat", "size": round(diag, 1)}},
+            {"tool": "mesh_export", "arguments": {"part": "edited", "path": str(self.repaired)}},
+            {"tool": "mesh_reduce", "arguments": {"tolerance": tolerance, "maxTriangles": max_triangles}},
+            {"tool": "mesh_export", "arguments": {"part": "reduced", "path": str(self.reduced)}},
+        ]
+        report = []
+        for c in calls:          # one at a time: each is a long job on a big scan, and each answer is worth reading
+            txt, err = self.batch([c])
+            try:
+                res = json.loads(txt)["results"][0]
+                body = json.dumps(res.get("result") if res.get("ok") else res.get("error"))
+            except Exception:
+                res, body = {"ok": False}, txt
+            report.append(f"{c['tool']}: {'ok' if res.get('ok') else 'FAILED'} {body[:400]}")
+            if not res.get("ok"):
+                return "\n".join(report)
+        info = write_step(self.organic_step, read_stl(self.reduced), stem)
+        report.append(f"STEP solid: {self.organic_step.name}, {info['faces']} faces")
+        return "\n".join(report)
 
     def scan_as_posed(self):
         """The scan in the pose the model is built in (after align_*), proven to be the original scan

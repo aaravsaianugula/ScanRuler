@@ -71,6 +71,7 @@ class MeshDistance:
         triangle's outward normal). shortcut: the sign is that one triangle's, so it can be wrong right
         at an edge or corner; good enough to say whether a cluster is extra or missing material."""
         d, sgn = np.empty(len(p)), np.empty(len(p))
+        self.last_tri = np.empty(len(p), int)                       # the nearest triangle of each point
         nrm = np.cross(self.tris[:, 1] - self.tris[:, 0], self.tris[:, 2] - self.tris[:, 0])
         for s in range(0, len(p), chunk):
             q = p[s:s + chunk]
@@ -78,14 +79,17 @@ class MeshDistance:
             cand = self.tid[idx]                                     # (m, k) triangle ids
             best = np.full(len(q), np.inf)
             side = np.ones(len(q))
+            tri = cand[:, 0].copy()
             for j in range(k):
                 t = self.tris[cand[:, j]]
                 c = closest_on_tris(q, t[:, 0], t[:, 1], t[:, 2])
                 dj = np.linalg.norm(q - c, axis=1)
                 better = dj < best
                 best = np.where(better, dj, best)
+                tri = np.where(better, cand[:, j], tri)
                 side = np.where(better, np.sign(((q - c) * nrm[cand[:, j]]).sum(1)) + (dj == 0), side)
             d[s:s + chunk], sgn[s:s + chunk] = best, np.where(side >= 0, 1.0, -1.0)
+            self.last_tri[s:s + chunk] = tri
         return d, sgn
 
 
@@ -325,7 +329,68 @@ def validate(inp, model, faces=None, model_faces=None, mode="cad", noise=None, s
     )
 
 
+def edge_counts(tris):
+    """Open (one face) and non-manifold (three or more) edges of a triangle soup, by shared vertex."""
+    _, inv = np.unique(np.round(tris.reshape(-1, 3), 6), axis=0, return_inverse=True)
+    f = inv.reshape(-1, 3)
+    e = np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1)
+    _, n = np.unique(e, axis=0, return_counts=True)
+    return int((n == 1).sum()), int((n > 2).sum())
+
+
+def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000):
+    """The organic route's gate: the delivered solid (reduced) is the scan, closed. Distances are
+    measured only where the scan has surface: islands the repair removed and holes it filled (new
+    triangles, no scan under them) are reported as areas, not counted as error."""
+    A, R0, R = read_stl(inp), read_stl(repaired), read_stl(reduced)
+    size = float(np.linalg.norm(np.ptp(A.reshape(-1, 3), axis=0)))
+    spacing = max(0.1, size / 600)
+    rng = np.random.default_rng(0)
+    cap = lambda p: p[rng.choice(len(p), max_points, replace=False)] if len(p) > max_points else p
+    # a repaired triangle is the scan's own when all its corners are scan vertices (filling adds new ones)
+    scan_v = {tuple(v) for v in np.round(A.reshape(-1, 3), 4)}
+    own = np.array([all(tuple(v) in scan_v for v in t) for t in np.round(R0, 4)])
+
+    pa = cap(sample(A, spacing))
+    d_rep, _ = MeshDistance(R0, spacing)(pa)
+    kept = d_rep < 0.05                                     # the rest lay on islands the repair removed
+    d_ar, _ = MeshDistance(R, spacing)(pa[kept])
+    pb = cap(sample(R, spacing))
+    d_ra, sg = MeshDistance(A, spacing)(pb)
+    near = MeshDistance(R0, spacing)
+    near(pb)
+    supported = own[near.last_tri]                          # over scan surface, not over a filled hole
+    s_ar, s_ba = stats(d_ar), stats(d_ra[supported])
+    open_e, nonman = edge_counts(R)
+    area = lambda T: float(0.5 * np.linalg.norm(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), axis=1).sum())
+    tolr = dict(rms=tol, p95=tol, p99=1.5 * tol, max=6 * tol + 0.1, vol=None, dim=None, face_p95=None)
+    checks = {
+        "closed": open_e == 0 and nonman == 0,
+        "rms": max(s_ar["rms"], s_ba["rms"]) <= tolr["rms"],
+        "p99": max(s_ar["p99"], s_ba["p99"]) <= tolr["p99"],
+        "max": max(s_ar["max"], s_ba["max"]) <= tolr["max"],
+    }
+    devs = [dict(c, of="model", kind="off the scan") for c in clusters(pb[supported], d_ra[supported], sg[supported], tolr["p99"], spacing)]
+    return dict(
+        verdict="PASS" if all(checks.values()) else "FAIL", mode="organic", noise=None, spacing=spacing,
+        checks=checks, tolerances=tolr, input_to_model=s_ar, model_to_input=s_ba,
+        volume=dict(input=None, model=abs(volume(R)), diff_pct=0.0),
+        worst_faces=[], bad_dimensions=[], deviation_clusters=devs[:10], dimensions_checked=0, dimensions_ok=0,
+        solid=dict(triangles=len(R), open_edges=open_e, nonmanifold_edges=nonman),
+        removed_area_mm2=round(float((~kept).mean()) * area(A), 1),
+        filled_area_mm2=round(float((~supported).mean()) * area(R), 1),
+    )
+
+
 def summary(r):
+    if r.get("mode") == "organic":
+        f = lambda s: f"rms {s['rms']:.4f} p95 {s['p95']:.4f} p99 {s['p99']:.4f} max {s['max']:.4f}"
+        return "\n".join([
+            f"VERDICT {r['verdict']} (organic: the repaired scan as a solid)",
+            f"scan->solid {f(r['input_to_model'])}", f"solid->scan {f(r['model_to_input'])}  (over scanned surface)",
+            f"solid: {r['solid']['triangles']} faces, open edges {r['solid']['open_edges']}, non-manifold {r['solid']['nonmanifold_edges']}, volume {r['volume']['model']:.1f} mm3",
+            f"filled holes {r['filled_area_mm2']} mm2, removed islands {r['removed_area_mm2']} mm2",
+            "failed: " + (", ".join(k for k, v in r["checks"].items() if not v) or "none")])
     f = lambda s: f"rms {s['rms']:.4f} p95 {s['p95']:.4f} p99 {s['p99']:.4f} max {s['max']:.4f}"
     lines = [f"VERDICT {r['verdict']} ({r['mode']}" + (f", noise sigma {r['noise']:.4f}" if r["noise"] else "") + ")",
              f"input->model {f(r['input_to_model'])}", f"model->input {f(r['model_to_input'])}",
