@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""A closed triangle mesh as a STEP solid (AP214 FACETED_BREP: one planar face per triangle).
+"""A closed manifold triangle mesh as a STEP solid (AP214 MANIFOLD_SOLID_BREP: a planar face per triangle,
+edges and vertices shared between faces).
 
 For the organic route: a figurine has no analytic faces to rebuild, so the deliverable solid is the
 repaired scan itself, in a form every CAD system imports as a body. ScanRuler cannot write one
@@ -54,31 +55,51 @@ def write_step(path, tris, name="Body"):
     z = ent("DIRECTION('',(0.,0.,1.))")
     x = ent("DIRECTION('',(1.,0.,0.))")
     axis = ent(f"AXIS2_PLACEMENT_3D('',#{o},#{z},#{x})")
-    first = n[0] + 1
-    for p in v:
-        ent(f"CARTESIAN_POINT('',({p[0]:.6f},{p[1]:.6f},{p[2]:.6f}))")
-    faces = []
-    # each face its own plane: OCCT's reader takes a FACE_SURFACE (bound + geometry), not a bare FACE
+    # real topology, not POLY_LOOPs: a face per triangle, but one edge per mesh edge shared by its two
+    # faces, so a reader gets one connected closed shell (OCCT splits a POLY_LOOP shell into many solids)
+    pt = [ent(f"CARTESIAN_POINT('',({p[0]:.6f},{p[1]:.6f},{p[2]:.6f}))") for p in v]
+    vx = [ent(f"VERTEX_POINT('',#{i})") for i in pt]
+    he = np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])            # half-edges, face-major by corner
+    und, e_of = np.unique(np.sort(he, axis=1), axis=0, return_inverse=True)
+    e_of = e_of.ravel()
+    edge = []
+    for a, b in und:
+        d = v[b] - v[a]
+        ln = float(np.linalg.norm(d))
+        d = d / ln
+        line = ent(f"LINE('',#{pt[a]},#{ent(f'VECTOR({chr(39)}{chr(39)},#{ent(f'DIRECTION({chr(39)}{chr(39)},({d[0]:.9f},{d[1]:.9f},{d[2]:.9f}))')},{ln:.6f})')})")
+        edge.append(ent(f"EDGE_CURVE('',#{vx[a]},#{vx[b]},#{line},.T.)"))
     nrm = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
     nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-300
     ref = v[f[:, 1]] - v[f[:, 0]]
     ref /= np.linalg.norm(ref, axis=1, keepdims=True) + 1e-300
-    for (a, b, c), nn, rr in zip(f, nrm, ref):
+    nf, faces = len(f), []
+    for i, ((a, b, c), nn, rr) in enumerate(zip(f, nrm, ref)):
+        oe = []
+        for k, (s, t) in enumerate(((a, b), (b, c), (c, a))):
+            oe.append(ent(f"ORIENTED_EDGE('',*,*,#{edge[e_of[k * nf + i]]},{'.T.' if s < t else '.F.'})"))
+        loop = ent("EDGE_LOOP('',(" + ",".join(f"#{j}" for j in oe) + "))")
+        bound = ent(f"FACE_OUTER_BOUND('',#{loop},.T.)")
         dn = ent(f"DIRECTION('',({nn[0]:.9f},{nn[1]:.9f},{nn[2]:.9f}))")
         dr = ent(f"DIRECTION('',({rr[0]:.9f},{rr[1]:.9f},{rr[2]:.9f}))")
-        pl = ent(f"PLANE('',#{ent(f'AXIS2_PLACEMENT_3D({chr(39)}{chr(39)},#{first + a},#{dn},#{dr})')})")
-        loop = ent(f"POLY_LOOP('',(#{first + a},#{first + b},#{first + c}))")
-        bound = ent(f"FACE_OUTER_BOUND('',#{loop},.T.)")
-        faces.append(ent(f"FACE_SURFACE('',(#{bound}),#{pl},.T.)"))
-    shell = ent("CLOSED_SHELL('',(" + ",".join(f"#{i}" for i in faces) + "))")
-    brep = ent(f"FACETED_BREP('{name}',#{shell})")
-    rep = ent(f"FACETED_BREP_SHAPE_REPRESENTATION('',(#{brep},#{axis}),#{ctx})")
+        pl = ent(f"PLANE('',#{ent(f'AXIS2_PLACEMENT_3D({chr(39)}{chr(39)},#{pt[a]},#{dn},#{dr})')})")
+        faces.append(ent(f"ADVANCED_FACE('',(#{bound}),#{pl},.T.)"))
+    # a closed shell is one connected piece: a body in several pieces is a solid per piece
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    adj = coo_matrix((np.ones(3 * nf), (f.ravel(), np.roll(f, 1, axis=1).ravel())), shape=(len(v), len(v)))
+    comp = connected_components(adj, directed=False)[1][f[:, 0]]
+    breps = []
+    for k, c in enumerate(np.unique(comp)):
+        shell = ent("CLOSED_SHELL('',(" + ",".join(f"#{faces[i]}" for i in np.flatnonzero(comp == c)) + "))")
+        breps.append(ent(f"MANIFOLD_SOLID_BREP('{name}{'' if k == 0 else f' {k + 1}'}',#{shell})"))
+    rep = ent("ADVANCED_BREP_SHAPE_REPRESENTATION('',(" + ",".join(f"#{b}" for b in breps) + f",#{axis}),#{ctx})")
     ent(f"SHAPE_DEFINITION_REPRESENTATION(#{pds},#{rep})")
     head = ["ISO-10303-21;", "HEADER;", "FILE_DESCRIPTION(('faceted solid from a repaired scan'),'2;1');",
             f"FILE_NAME('{Path(path).name}','{now}',(''),(''),'scanruler-swift','scanruler-swift','');",
             "FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));", "ENDSEC;", "DATA;"]
     Path(path).write_text("\n".join(head + lines + ["ENDSEC;", "END-ISO-10303-21;", ""]), encoding="ascii")
-    return dict(vertices=len(v), faces=len(f))
+    return dict(vertices=len(v), faces=len(f), solids=len(breps))
 
 
 def main():

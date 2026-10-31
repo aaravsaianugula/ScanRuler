@@ -42,11 +42,18 @@ def close_mesh(tris, h=0.3, slab=24):
     vol = np.einsum("ij,ij->i", out[:, 0], np.cross(out[:, 1], out[:, 2]))
     if vol.sum() < 0:
         out, f, vol = out[:, ::-1], f[:, ::-1], -vol
-    # a shell facing in is a sealed void - a pocket where an arm presses on the body - not part of a figurine
+    # a shell facing in is a sealed void - a pocket where an arm presses on the body - not part of a figurine;
+    # a speck under three cells across is a bubble where a noisy scan's winding number flickers past 1/2.
+    # Thin slivers larger than that follow scanned surface (a base's rim lip) and stay, as pieces of their own
     n = len(v)
     adj = coo_matrix((np.ones(3 * len(f)), (f.ravel(), np.roll(f, 1, axis=1).ravel())), shape=(n, n))
     comp = connected_components(adj, directed=False)[1][f[:, 0]]
-    return out[(np.bincount(comp, weights=vol) > 0)[comp]]
+    lo = np.full((comp.max() + 1, 3), np.inf)
+    hi = -lo
+    np.minimum.at(lo, comp, out.min(1))
+    np.maximum.at(hi, comp, out.max(1))
+    keep = (np.bincount(comp, weights=vol) > 0) & (np.linalg.norm(hi - lo, axis=1) >= 3 * h)
+    return out[keep[comp]]
 
 
 def reduce_mesh(tris, faces):
