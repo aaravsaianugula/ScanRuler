@@ -276,6 +276,9 @@ def validate(inp, model, faces=None, model_faces=None, mode="cad", noise=None, s
     devs = [dict(c, of="scan", kind="missing material" if c["side"] == "outside" else "extra material") for c in clusters(pa, d_ab, sg_ab, thresh, spacing)]
     devs += [dict(c, of="model", kind="extra material" if c["side"] == "outside" else "missing material") for c in clusters(pb, d_ba, sg_ba, thresh, spacing)]
     s_ab, s_ba = stats(d_ab), stats(d_ba)
+    area = float(0.5 * np.linalg.norm(np.cross(A[:, 1] - A[:, 0], A[:, 2] - A[:, 0]), axis=1).sum())
+    min_band = max(2.0, 5e-4 * area)
+    systematic = [c for c in devs if c["area_mm2"] >= min_band]
     va, vb = volume(A), volume(B)
     vol_pct = 100 * (vb - va) / va
 
@@ -308,6 +311,8 @@ def validate(inp, model, faces=None, model_faces=None, mode="cad", noise=None, s
         "max": max(s_ab["max"], s_ba["max"]) <= tol["max"],
         "volume": abs(vol_pct) <= tol["vol"],
         "faces": not worst_faces,
+        # noise beyond the threshold is scattered; a connected band of it is a wrong surface (a fillet for a chamfer)
+        "systematic": not systematic,
         "dimensions": not bad_dims,
     }
     return dict(
