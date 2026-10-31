@@ -171,13 +171,10 @@ class Workbench:
         txt, err = self.batch([{"tool": "export_stl", "arguments": {"path": str(path)}}])
         if err or '"ok":false' in txt:
             return f"could not export the scan in its pose: {txt[:500]}"
-        A, B = read_stl(self.input).reshape(-1, 3), read_stl(path).reshape(-1, 3)
-        if A.shape != B.shape:
-            return "refused: the scan in ScanRuler is no longer the input scan (its triangles changed). Undo the mesh edits."
-        a0, b0 = A - A.mean(0), B - B.mean(0)
-        u, _, vt = np.linalg.svd(a0.T @ b0)
-        R = u @ np.diag([1, 1, np.sign(np.linalg.det(u @ vt))]) @ vt
-        if np.abs(a0 @ R - b0).max() > 1e-3:
+        A, B = read_stl(self.input), read_stl(path)
+        # the exporter may reorder triangles: compare what a rigid move keeps, order-free - every edge length
+        edges = lambda T: np.sort(np.linalg.norm(T - np.roll(T, 1, axis=1), axis=2).ravel())
+        if A.shape != B.shape or np.abs(edges(A) - edges(B)).max() > 1e-4:
             return "refused: the scan in ScanRuler is not the input scan moved rigidly (it was edited). Undo the mesh edits."
         return path
 

@@ -89,27 +89,72 @@ class MeshDistance:
         return d, sgn
 
 
+def shape_of(q):
+    """What surface the points of a cluster lie on - a plane or a cylinder, with its numbers and rms -
+    so the fix can be built from evidence, not from a bounding box. None when neither fits."""
+    if len(q) < 12:
+        return None
+    c = q.mean(0)
+    w, v = np.linalg.eigh(np.cov((q - c).T))
+    if np.sqrt(max(w[0], 0)) < 0.03 + 0.002 * np.sqrt(w[2]):
+        n = v[:, 0]
+        return f"plane n={np.round(n, 3).tolist()} through {np.round(c, 2).tolist()} (rms {np.sqrt(max(w[0], 0)):.3f})"
+    best = None
+    for ax in [v[:, 2]] + list(np.eye(3)):        # the long direction, then the world axes
+        e1 = np.cross(ax, [1, 0, 0] if abs(ax[0]) < 0.9 else [0, 1, 0]); e1 /= np.linalg.norm(e1)
+        e2 = np.cross(ax, e1)
+        x, y = (q - c) @ e1, (q - c) @ e2
+        A = np.c_[2 * x, 2 * y, np.ones_like(x)]
+        sol, *_ = np.linalg.lstsq(A, x * x + y * y, rcond=None)
+        r = np.sqrt(max(sol[2] + sol[0] ** 2 + sol[1] ** 2, 0))
+        res = float(np.sqrt(np.mean((np.hypot(x - sol[0], y - sol[1]) - r) ** 2)))
+        if r > 0 and (best is None or res < best[0]):
+            best = (res, r, ax, c + sol[0] * e1 + sol[1] * e2, np.ptp((q - c) @ ax))
+    res, r, ax, pt, length = best
+    if r > 1e3:
+        return None
+    # radius along the axis: constant is a cylinder, linear is a cone (a chamfer band, a drafted wall)
+    t = (q - pt) @ ax
+    rad = np.linalg.norm(q - pt - np.outer(t, ax), axis=1)
+    k, a0 = np.polyfit(t, rad, 1) if np.ptp(t) > 1e-6 else (0.0, float(rad.mean()))
+    cres = float(np.sqrt(np.mean((rad - (a0 + k * t)) ** 2)))
+    tol = max(0.03, 0.01 * r)
+    where = f"axis {np.round(ax, 3).tolist()} through {np.round(pt, 2).tolist()}"
+    if res < tol and abs(k) < 0.02:
+        return f"cylinder R{r:.3f} (dia {2 * r:.3f}) {where}, {length:.1f} mm long (rms {res:.3f})"
+    if cres < tol:
+        t0, t1 = float(t.min()), float(t.max())
+        p0, p1 = np.round(pt + t0 * ax, 2).tolist(), np.round(pt + t1 * ax, 2).tolist()
+        return (f"cone {where}: R{a0 + k * t0:.3f} at {p0} to R{a0 + k * t1:.3f} at {p1}, "
+                f"half-angle {np.degrees(np.arctan(abs(k))):.1f} deg (rms {cres:.3f})")
+    return None
+
+
 def clusters(p, d, sgn, thresh, spacing, top=8):
     """Where the deviation exceeds thresh: connected groups of such points, largest first."""
     m = d > thresh
     if not m.any():
         return []
-    q, dd, ss = p[m], d[m], sgn[m]
-    pairs = cKDTree(q).query_pairs(2.5 * spacing, output_type="ndarray")
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
-    g = coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(len(q), len(q))) if len(pairs) else coo_matrix((len(q), len(q)))
-    _, lab = connected_components(g, directed=False)
     out = []
-    for c in np.unique(lab):
-        i = lab == c
-        if i.sum() < 4:
+    for side in (1.0, -1.0):                    # outside and inside apart: one cluster is one kind of error
+        k = m & (sgn == side)
+        if k.sum() < 4:
             continue
-        out.append(dict(points=int(i.sum()), area_mm2=round(float(i.sum() * spacing ** 2), 2),
-                        mean=round(float(dd[i].mean()), 4), max=round(float(dd[i].max()), 4),
-                        side="outside" if ss[i].mean() > 0 else "inside",
-                        center=np.round(q[i].mean(0), 2).tolist(),
-                        box=[np.round(q[i].min(0), 2).tolist(), np.round(q[i].max(0), 2).tolist()]))
+        q, dd = p[k], d[k]
+        pairs = cKDTree(q).query_pairs(2.5 * spacing, output_type="ndarray")
+        g = coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(len(q), len(q))) if len(pairs) else coo_matrix((len(q), len(q)))
+        _, lab = connected_components(g, directed=False)
+        for c in np.unique(lab):
+            i = lab == c
+            if i.sum() < 4:
+                continue
+            out.append(dict(points=int(i.sum()), area_mm2=round(float(i.sum() * spacing ** 2), 2), shape=shape_of(q[i]),
+                            mean=round(float(dd[i].mean()), 4), max=round(float(dd[i].max()), 4),
+                            side="outside" if side > 0 else "inside",
+                            center=np.round(q[i].mean(0), 2).tolist(),
+                            box=[np.round(q[i].min(0), 2).tolist(), np.round(q[i].max(0), 2).tolist()]))
     return sorted(out, key=lambda c: -c["area_mm2"] * c["mean"])[:top]
 
 
@@ -228,8 +273,8 @@ def validate(inp, model, faces=None, model_faces=None, mode="cad", noise=None, s
     d_ba, sg_ba = MeshDistance(A, spacing / 2)(pb)                  # model -> input: extra material
     # input outside the model = material the model lacks; model outside the input = material it has too much of
     thresh = max(tol["p99"], 3 * (noise or 0) + 0.02)
-    devs = [dict(c, kind="missing material" if c["side"] == "outside" else "extra material") for c in clusters(pa, d_ab, sg_ab, thresh, spacing)]
-    devs += [dict(c, kind="extra material" if c["side"] == "outside" else "missing material") for c in clusters(pb, d_ba, sg_ba, thresh, spacing)]
+    devs = [dict(c, of="scan", kind="missing material" if c["side"] == "outside" else "extra material") for c in clusters(pa, d_ab, sg_ab, thresh, spacing)]
+    devs += [dict(c, of="model", kind="extra material" if c["side"] == "outside" else "missing material") for c in clusters(pb, d_ba, sg_ba, thresh, spacing)]
     s_ab, s_ba = stats(d_ab), stats(d_ba)
     va, vb = volume(A), volume(B)
     vol_pct = 100 * (vb - va) / va
@@ -284,7 +329,8 @@ def summary(r):
     for w in r["worst_faces"]:
         lines.append(f"  face {w['face']} {w['kind']} area {w['area']} not reproduced: p95 {w['p95']} mm, box {w['box']}")
     for c in r["deviation_clusters"]:
-        lines.append(f"  {c['kind']}: {c['area_mm2']} mm2, mean {c['mean']} max {c['max']} mm, center {c['center']}, box {c['box']}")
+        lines.append(f"  {c['kind']}: {c['area_mm2']} mm2, mean {c['mean']} max {c['max']} mm, center {c['center']}, box {c['box']}"
+                     + (f"\n      the {'scan' if c.get('of') == 'scan' else 'model'} surface there: {c['shape']}" if c.get("shape") else ""))
     for d in r["bad_dimensions"]:
         lines.append(f"  dim {d['desc']} area {d['area']}: " + ("missing in model" if d["err"] is None else f"off by {d['err']:.4f} mm"))
     return "\n".join(lines)
