@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Reverse-engineer a mesh/scan into validated CAD with Swift 1.5.
 
-    python swift/run.py part.stl [--mode auto|cad|scan] [--work DIR] [--max-turns 60] [--no-swift]
+    python swift/run.py part.stl [--mode auto|cad|scan|organic] [--work DIR] [--max-turns 60] [--no-swift]
                                  [--headless-browser] [--live] [--events]
 
-auto: a CAD-exported mesh (exact surfaces) goes the exact-reading way; a real scan is measured in the
+auto: a free-form model (figurine, sculpture: few planes or cylinders) goes the organic way - repaired into a
+closed solid, written as a faceted STEP; a CAD-exported mesh (exact surfaces) goes the exact-reading way; a real scan is measured in the
 ScanRuler page (fits with sigma evidence) by Swift. Either way the model is held to the independent
 validator, and only a PASS is delivered as <part>_CAD.step; otherwise best_attempt_CAD.step, marked so.
 
@@ -36,6 +37,36 @@ def looks_like_cad(work):
     total = sum(x["area"] for x in f) or 1
     res = [x["res"] for x in f if x["kind"] == "plane" and x["area"] > 0.01 * total and x.get("res") is not None]
     return bool(res) and float(np.median(res)) < 1e-4 and len(f) < max(50, n_tris / 20)
+
+
+def surface_shares(stl, samples=40000, candidates=1500, deg=8):
+    """How much of the surface faces a few directions (planes: the six most populated, a face and its
+    opposite as one) and the most of it on one great circle (cylinders round one axis), by area.
+    Machined parts and their scans: planes >= 0.58 or cylinders >= 0.68; figurines: about 0.2-0.3 each."""
+    from meshio_min import read_stl
+    t = read_stl(stl)
+    n = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
+    a = np.linalg.norm(n, axis=1)
+    keep = a > 0
+    t, n, a = t[keep], n[keep] / a[keep, None], a[keep]
+    rng = np.random.default_rng(0)
+    pick = rng.choice(len(n), samples, p=a / a.sum())
+    s, mid = n[pick], t[pick].mean(1)
+    c = s[rng.choice(len(s), candidates, replace=False)]
+    cos, left, planes, flat = np.cos(np.radians(deg)), np.ones(len(s), bool), 0.0, None
+    for _ in range(6):
+        best = c[(np.abs(c @ s[left].T) > cos).sum(1).argmax()]
+        cover = left & (np.abs(s @ best) > cos)
+        planes += cover.mean()
+        left &= ~cover
+        if flat is None:
+            # the most populated flat level along it - a figurine's base, a part's biggest face - for measuring
+            h = mid[cover] @ best
+            level = np.bincount(np.round(h - h.min()).astype(int)).argmax() + h.min()
+            on = np.abs(h - level) < 1
+            nrm = best * np.sign((s[cover][on] @ best).sum())
+            flat = dict(normal=nrm.round(3).tolist(), point=np.median(mid[cover][on], axis=0).round(2).tolist(), share=round(float(on.mean() * cover.mean()), 3))
+    return float(planes), float((np.abs(c @ s.T) < np.sin(np.radians(deg))).mean(1).max()), flat
 
 
 def main():
@@ -80,7 +111,13 @@ def main():
         wb.emit, wb.narrate = emit, True
         phase("analyze", "Reading the mesh")
         n_tris = (stl.stat().st_size - 84) // 50
-        if n_tris > 400_000 and a.mode != "cad":
+        planes, cylinders, flat = surface_shares(wb.input)
+        organic = planes < 0.4 and cylinders < 0.45
+        log(f"[run] surface on planes {planes:.2f}, on cylinders {cylinders:.2f}: " + ("free-form (organic)" if organic else "engineered"))
+        if a.mode == "auto" and organic:
+            analysis = f"{n_tris} triangles, free-form: {planes:.0%} of the surface on planes, {cylinders:.0%} on cylinders of one axis\n\n\n"
+            mode = "organic"
+        elif n_tris > 400_000 and a.mode != "cad":
             # shortcut: the exact-reading analyzer takes minutes on a scan this big and only feeds CAD meshes;
             # a CAD export that dense would need --mode cad
             analysis = f"{n_tris} triangles: a scan (exact reading skipped)\n\n\n"
@@ -110,7 +147,7 @@ def main():
                        f"{files} (main axis {wb.main_axis}, body \"{wb.body}\") and the validator says:\n{clip(agent.t_check(), 6000)}\n\n"
                        "Fix it until the validator passes.")
                 report, failed = agent.run(msg)
-        elif mode == "organic":
+        elif mode == "organic" and (a.no_swift or a.mode == "organic"):
             if not a.live:
                 wb.close()
                 wb = Workbench(stl, work, page=True, show_browser=not a.headless_browser)
@@ -122,7 +159,8 @@ def main():
             log(check)
             emit("validation", result=wb.last_validation, summary=check)
             failed = wb.last_validation is None or wb.last_validation["verdict"] != "PASS"
-            report = "Organic route: islands removed, holes filled, reduced within tolerance, written as a faceted STEP solid."
+            report = ("Organic route: islands removed and holes filled in ScanRuler, closed into a manifold solid (winding number + "
+                      "marching cubes, sealed voids dropped), decimated keeping it closed (MeshLab), written as a faceted STEP solid.")
         elif a.no_swift:
             report = "A real scan needs Swift: the exact-reading pass works on CAD-exported meshes only."
             log(f"[run] {report}")
@@ -135,6 +173,11 @@ def main():
             agent = Agent(wb, "scan", log=log, max_turns=a.max_turns, emit=emit)
             msg = (f"Scan: {stl.name}, opened in ScanRuler (millimetres).\n{chr(10).join(analysis.splitlines()[1:4])}\n\n"
                    "Start with the guide index, then work the scan-to-cad flow until the validator passes.")
+            if mode == "organic":
+                msg = (f"Scan: {stl.name}, opened in ScanRuler (millimetres). {analysis.splitlines()[0]}: classified organic. "
+                       "Look at it, call organic_route, then measure the analytic features it has with their sigma. "
+                       f"The biggest flat level of its surface (a base, if it stands on one) has normal {flat['normal']} through "
+                       f"{flat['point']} ({flat['share']:.0%} of the surface): that normal is the up/down axis, and that is where to start.")
             report, failed = agent.run(msg)
             failed = failed or not agent.passed
 

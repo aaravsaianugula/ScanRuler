@@ -5,8 +5,9 @@ export const PHASES = [
   { id: 'analyze', n: '02', label: 'Read', kana: '解析' },
   { id: 'autopilot', n: '03', label: 'Autopilot', kana: '自動' },
   { id: 'swift', n: '04', label: 'Swift', kana: '思考' },
-  { id: 'check', n: '05', label: 'Validate', kana: '検証' },
-  { id: 'deliver', n: '06', label: 'Deliver', kana: '納品' },
+  { id: 'organic', n: '05', label: 'Solid', kana: '造形' },
+  { id: 'check', n: '06', label: 'Validate', kana: '検証' },
+  { id: 'deliver', n: '07', label: 'Deliver', kana: '納品' },
 ]
 
 export const initial = {

@@ -209,7 +209,7 @@ button:focus-visible, [role=button]:focus-visible, input:focus-visible, label:fo
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .chip { font: 700 10px/1 var(--mono); padding: 4px 6px; border: 1.5px solid var(--line); letter-spacing: 0.06em; }
 .chip.yellow { border-color: var(--yellow); color: var(--yellow); }
-.rail { list-style: none; display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; margin: 4px 14px 8px; padding: 0; }
+.rail { list-style: none; display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin: 4px 14px 8px; padding: 0; }
 .rail li { border: 1.5px solid var(--line); padding: 4px 5px; display: grid; line-height: 1.15; color: var(--muted); transition: background 0.3s, color 0.3s; }
 .rail b { font: 800 14px/1 var(--display); }
 .rail span { font: 700 9px/1.2 var(--display); letter-spacing: 0.1em; text-transform: uppercase; }

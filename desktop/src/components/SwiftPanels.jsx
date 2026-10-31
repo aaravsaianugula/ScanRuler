@@ -31,7 +31,7 @@ export function OrbCard({ run, elapsed }) {
           <div className="orb-sub">{run.phaseLabel || '—'}</div>
           <div className="chips">
             <span className="chip">{run.swift ? 'SWIFT 1.5' : 'AUTOPILOT'}</span>
-            {run.mode && <span className="chip yellow">{run.mode === 'cad' ? 'CAD EXACT' : 'SCAN'}</span>}
+            {run.mode && <span className="chip yellow">{{ cad: 'CAD EXACT', organic: 'ORGANIC' }[run.mode] || 'SCAN'}</span>}
             {run.turn != null && <span className="chip">TURN {run.turn + 1}/{run.maxTurns}</span>}
             <span className="chip">{elapsed}</span>
           </div>
@@ -148,7 +148,7 @@ export function Validation({ validations }) {
   const r = v.result
   const t = r.tolerances
   const worst = (k) => Math.max(r.input_to_model[k], r.model_to_input[k])
-  const metrics = [['RMS', worst('rms'), t.rms], ['P95', worst('p95'), t.p95], ['P99', worst('p99'), t.p99], ['MAX', worst('max'), t.max], ['VOL%', Math.abs(r.volume.diff_pct), t.vol]]
+  const metrics = [['RMS', worst('rms'), t.rms], ['P95', worst('p95'), t.p95], ['P99', worst('p99'), t.p99], ['MAX', worst('max'), t.max], ...(r.mode === 'organic' ? [] : [['VOL%', Math.abs(r.volume.diff_pct), t.vol]])]
   const history = validations.map((x) => Math.max(x.result.input_to_model.p95, x.result.model_to_input.p95))
   const pass = r.verdict === 'PASS'
   return (

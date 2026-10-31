@@ -172,7 +172,7 @@ function Home({ onStart, onOpenReport, running, onResume }) {
 
           <fieldset className="seg">
             <legend>INPUT</legend>
-            {[['auto', 'AUTO', 'detect'], ['cad', 'CAD EXACT', 'clean export'], ['scan', 'SCAN', '3D scan']].map(([v, l, s]) => (
+            {[['auto', 'AUTO', 'detects the kind'], ['cad', 'CAD EXACT', 'clean export'], ['scan', 'SCAN', '3D scan'], ['organic', 'ORGANIC', 'figurine → solid']].map(([v, l, s]) => (
               <label key={v} className={mode === v ? 'on' : ''}><input type="radio" name="mode" value={v} checked={mode === v} onChange={() => setMode(v)} /><b>{l}</b><small>{s}</small></label>
             ))}
           </fieldset>

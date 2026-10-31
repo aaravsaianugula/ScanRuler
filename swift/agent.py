@@ -50,9 +50,9 @@ COMMON = [
 ]
 SCAN_TOOLS = [
     tool("organic_route", "For an organic part (figurine, sculpture, anatomy, a grip with no analytic faces): repair the scan "
-         "(islands off, holes filled), reduce it within tolerance and write it as a closed STEP solid. The validator then "
-         "judges that solid against the scan.", {"reason": {"type": "string"}, "max_triangles": {"type": "integer"},
-                                                  "tolerance": {"type": "number"}}, ["reason"]),
+         "(islands off, holes filled, closed), reduce it to max_triangles and write it as a closed STEP solid. The validator then "
+         "judges that solid against the scan. Call it once: it takes minutes on a big scan, and what it cannot follow (sealed crevices, "
+         "unscanned mouths) does not change with max_triangles.", {"reason": {"type": "string"}, "max_triangles": {"type": "integer"}}, ["reason"]),
 ]
 CAD_TOOLS = [
     tool("run_script", "Run a reverse-engineering script (analyze, frame, slabs, revolve, holes, blends, compare, helix, profile, rz, centers, two_way, slice, vslice) with CLI args.",
@@ -151,7 +151,7 @@ class Agent:
         self.emit("validation", result=r, summary=out)
         if r:
             score = (sum(not v for v in r["checks"].values()), max(r["input_to_model"]["p95"], r["model_to_input"]["p95"]))
-            if self.best is None or score < self.best[0]:
+            if self.mode != "organic" and (self.best is None or score < self.best[0]):   # organic: one solid, kept as built
                 self.best = (score, r)
                 shutil.copyfile(self.wb.work / "model.stl", self.wb.work / "best_model.stl")
                 self.wb.batch([{"tool": "reverse_export_step", "arguments": {"path": str(self.wb.work / "best_attempt_CAD.step")}}])
@@ -217,10 +217,11 @@ class Agent:
     def t_run_script(self, name, args=()):
         return self.wb.script(name, args)       # scripts write step files; the model changes on rebuild
 
-    def t_organic_route(self, reason, max_triangles=80000, tolerance=0.1):
+    def t_organic_route(self, reason, max_triangles=150000):
         self.log(f"[swift] organic route: {reason}")
         self.emit("phase", phase="organic", label="Repairing the scan into a solid")
-        out = self.wb.organic(max_triangles, tolerance)
+        self.emit("mode", mode="organic")
+        out = self.wb.organic(max_triangles)
         self.mode = "organic"            # the gate is now the organic solid against the scan
         self.changes += 1
         return out + "\n\n" + self.t_check()

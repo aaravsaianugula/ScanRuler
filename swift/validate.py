@@ -338,32 +338,53 @@ def edge_counts(tris):
     return int((n == 1).sum()), int((n > 2).sum())
 
 
+def enclosing(tris, pts, tid, eps=0.05):
+    """Which sample points lie on surface that bounds the scan's volume (generalized winding number):
+    inside just behind them, outside just in front. The rest is single sheet - a flap outside the body,
+    a stray layer inside it, a patch facing in - that no closed solid can lie on."""
+    import igl
+    v, inv = np.unique(tris.reshape(-1, 3), axis=0, return_inverse=True)
+    f = inv.reshape(-1, 3).astype(np.int64)
+    nrm = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])[tid]
+    nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-20
+    return (igl.fast_winding_number(v, f, pts - eps * nrm) > 0.75) & (igl.fast_winding_number(v, f, pts + eps * nrm) < 0.25)
+
+
 def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000):
-    """The organic route's gate: the delivered solid (reduced) is the scan, closed. Distances are
-    measured only where the scan has surface: islands the repair removed and holes it filled (new
-    triangles, no scan under them) are reported as areas, not counted as error."""
+    """The organic route's gate: the delivered solid (reduced) is the scan, closed, within the scan's own
+    noise (the scan-mode rule). Distances are measured only where the scan has surface that bounds a
+    volume: islands the repair removed, holes it filled (no scan under them) and single sheets (flaps,
+    stray inner layers) are reported as areas, not counted as error."""
     A, R0, R = read_stl(inp), read_stl(repaired), read_stl(reduced)
     size = float(np.linalg.norm(np.ptp(A.reshape(-1, 3), axis=0)))
     spacing = max(0.1, size / 600)
+    noise = estimate_noise(A, 0.3)          # 1.5 mm patches: wider ones measure a figurine's curvature, not its noise
     rng = np.random.default_rng(0)
-    cap = lambda p: p[rng.choice(len(p), max_points, replace=False)] if len(p) > max_points else p
-    # a repaired triangle is the scan's own when all its corners are scan vertices (filling adds new ones)
-    scan_v = {tuple(v) for v in np.round(A.reshape(-1, 3), 4)}
-    own = np.array([all(tuple(v) in scan_v for v in t) for t in np.round(R0, 4)])
+    cap = lambda n: rng.choice(n, max_points, replace=False) if n > max_points else np.arange(n)
+    # a repaired triangle is the scan's own when the scan has that very triangle (filling adds new ones)
+    q = np.round(np.concatenate([A.reshape(-1, 3), R0.reshape(-1, 3)]) * 1e4).astype(np.int64)
+    _, inv = np.unique(q, axis=0, return_inverse=True)
+    _, key = np.unique(np.sort(inv.ravel().reshape(-1, 3), axis=1), axis=0, return_inverse=True)
+    key = key.ravel()
+    own, kept = np.isin(key[len(A):], key[:len(A)]), np.isin(key[:len(A)], key[len(A):])
+    area = lambda T: float(0.5 * np.linalg.norm(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), axis=1).sum())
 
-    pa = cap(sample(A, spacing))
-    d_rep, _ = MeshDistance(R0, spacing)(pa)
-    kept = d_rep < 0.05                                     # the rest lay on islands the repair removed
-    d_ar, _ = MeshDistance(R, spacing)(pa[kept])
-    pb = cap(sample(R, spacing))
+    pr, tr = sample(R0, spacing, return_tri=True)
+    k = cap(len(pr))
+    pr, tr = pr[k], tr[k]
+    scanned = own[tr]
+    bounding = enclosing(R0, pr, tr)
+    d_ar, _ = MeshDistance(R, spacing)(pr[scanned & bounding])
+    pb = sample(R, spacing)
+    pb = pb[cap(len(pb))]
     d_ra, sg = MeshDistance(A, spacing)(pb)
     near = MeshDistance(R0, spacing)
     near(pb)
     supported = own[near.last_tri]                          # over scan surface, not over a filled hole
     s_ar, s_ba = stats(d_ar), stats(d_ra[supported])
     open_e, nonman = edge_counts(R)
-    area = lambda T: float(0.5 * np.linalg.norm(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), axis=1).sum())
-    tolr = dict(rms=tol, p95=tol, p99=1.5 * tol, max=6 * tol + 0.1, vol=None, dim=None, face_p95=None)
+    tolr = dict(rms=max(tol, 1.25 * noise + 0.01), p95=2.5 * noise + 0.02, p99=3.5 * noise + 0.03, max=8 * noise + 0.2,
+                vol=None, dim=None, face_p95=None)
     checks = {
         "closed": open_e == 0 and nonman == 0,
         "rms": max(s_ar["rms"], s_ba["rms"]) <= tolr["rms"],
@@ -372,13 +393,15 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000):
     }
     devs = [dict(c, of="model", kind="off the scan") for c in clusters(pb[supported], d_ra[supported], sg[supported], tolr["p99"], spacing)]
     return dict(
-        verdict="PASS" if all(checks.values()) else "FAIL", mode="organic", noise=None, spacing=spacing,
+        verdict="PASS" if all(checks.values()) else "FAIL", mode="organic", noise=noise, spacing=spacing,
         checks=checks, tolerances=tolr, input_to_model=s_ar, model_to_input=s_ba,
         volume=dict(input=None, model=abs(volume(R)), diff_pct=0.0),
         worst_faces=[], bad_dimensions=[], deviation_clusters=devs[:10], dimensions_checked=0, dimensions_ok=0,
         solid=dict(triangles=len(R), open_edges=open_e, nonmanifold_edges=nonman),
-        removed_area_mm2=round(float((~kept).mean()) * area(A), 1),
+        removed_area_mm2=round(area(A[~kept]), 1),
         filled_area_mm2=round(float((~supported).mean()) * area(R), 1),
+        sheet_area_mm2=round(float((scanned & ~bounding).mean()) * area(R0), 1),
+        sheet_share=round(float((scanned & ~bounding).sum() / max(1, scanned.sum())), 4),
     )
 
 
@@ -387,9 +410,11 @@ def summary(r):
         f = lambda s: f"rms {s['rms']:.4f} p95 {s['p95']:.4f} p99 {s['p99']:.4f} max {s['max']:.4f}"
         return "\n".join([
             f"VERDICT {r['verdict']} (organic: the repaired scan as a solid)",
-            f"scan->solid {f(r['input_to_model'])}", f"solid->scan {f(r['model_to_input'])}  (over scanned surface)",
+            f"scan->solid {f(r['input_to_model'])}  (over surface that bounds the scan's volume)", f"solid->scan {f(r['model_to_input'])}  (over scanned surface)",
             f"solid: {r['solid']['triangles']} faces, open edges {r['solid']['open_edges']}, non-manifold {r['solid']['nonmanifold_edges']}, volume {r['volume']['model']:.1f} mm3",
-            f"filled holes {r['filled_area_mm2']} mm2, removed islands {r['removed_area_mm2']} mm2",
+            f"noise sigma {r['noise']:.4f}: tolerances rms {r['tolerances']['rms']:.3f} p99 {r['tolerances']['p99']:.3f} max {r['tolerances']['max']:.3f}",
+            f"filled holes {r['filled_area_mm2']} mm2, removed islands {r['removed_area_mm2']} mm2, "
+            f"single sheets {r['sheet_area_mm2']} mm2 ({100 * r['sheet_share']:.1f} % of the scan: no closed solid lies on them, not measured)",
             "failed: " + (", ".join(k for k, v in r["checks"].items() if not v) or "none")])
     f = lambda s: f"rms {s['rms']:.4f} p95 {s['p95']:.4f} p99 {s['p99']:.4f} max {s['max']:.4f}"
     lines = [f"VERDICT {r['verdict']} ({r['mode']}" + (f", noise sigma {r['noise']:.4f}" if r["noise"] else "") + ")",

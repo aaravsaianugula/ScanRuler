@@ -65,11 +65,11 @@ function createWindow() {
   })
 }
 
-// opt-in, for checking the app without hands: STUDIO_AUTORUN=<stl> [STUDIO_AUTORUN_SWIFT=0] starts a
+// opt-in, for checking the app without hands: STUDIO_AUTORUN=<stl> [STUDIO_AUTORUN_SWIFT=0] [STUDIO_AUTORUN_MODE=organic] starts a
 // run once the window is up; STUDIO_SHOTS=<dir> saves a screenshot of the window every 15 s
 function debugHooks() {
   const { STUDIO_AUTORUN: stl, STUDIO_SHOTS: dir } = process.env
-  if (stl) win.webContents.once('did-finish-load', () => setTimeout(() => startRun(null, { stl, mode: 'auto', swift: process.env.STUDIO_AUTORUN_SWIFT !== '0' }), 2500))
+  if (stl) win.webContents.once('did-finish-load', () => setTimeout(() => startRun(null, { stl, mode: process.env.STUDIO_AUTORUN_MODE || 'auto', swift: process.env.STUDIO_AUTORUN_SWIFT !== '0' }), 2500))
   if (dir) {
     fs.mkdirSync(dir, { recursive: true })
     const logFile = path.join(dir, 'console.log')
