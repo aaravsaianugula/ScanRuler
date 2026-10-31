@@ -207,27 +207,32 @@ class Workbench:
         diag = float(np.linalg.norm(np.ptp(read_stl(self.input).reshape(-1, 3), axis=0)))
         report = []
 
-        def run(calls):
-            for c in calls:      # one at a time: each is a long job on a big scan, and each answer is worth reading
-                txt, err = self.batch([c])
-                try:
-                    res = json.loads(txt)["results"][0]
-                    body = json.dumps(res.get("result") if res.get("ok") else res.get("error"))
-                except Exception:
-                    res, body = {"ok": False}, txt
-                report.append(f"{c['tool']}: {'ok' if res.get('ok') else 'FAILED'} {body[:400]}")
-                if not res.get("ok"):
-                    return False
-            return True
+        def run(c):
+            txt, err = self.batch([c])      # one at a time: each is a long job on a big scan, and each answer is worth reading
+            try:
+                res = json.loads(txt)["results"][0]
+                # an answer's status line says what it did; a failure is kept whole, it is what the reader needs
+                body = (res.get("result") or {}).get("status") or "" if res.get("ok") else json.dumps(res.get("error"))
+            except Exception:
+                res, body = {"ok": False}, txt
+            # "No hole/piece ... smaller than that": nothing to do, not a failure
+            ok = res.get("ok") or str((res.get("error") or {}).get("message", "")).startswith(("No hole", "No piece"))
+            report.append(f"{c['tool']}: {'ok' if ok else 'FAILED'} {body[:600]}")
+            return res.get("result") or {} if ok else None
 
-        self.batch([{"tool": "mesh_discard_edited", "arguments": {}}])     # a second run starts from the scan again (fails harmlessly on a first)
-        if not run([
-            {"tool": "mesh_remove_islands", "arguments": {}},
-            {"tool": "mesh_fill_holes", "arguments": {"patch": "curved"}},
-            {"tool": "mesh_fill_holes", "arguments": {"patch": "flat", "size": round(diag, 1)}},
-            {"tool": "mesh_export", "arguments": {"part": "edited", "path": str(self.repaired)}},
-        ]):
-            return "\n".join(report)
+        # a second run starts from the scan again (fails harmlessly on a first); the panel keeps its sizes, so
+        # the curved fill is given the size it had the first time
+        self.batch([{"tool": "mesh_discard_edited", "arguments": {}}])
+        curved = {"patch": "curved", **({"size": self.hole_size} if getattr(self, "hole_size", None) else {})}
+        for c in [{"tool": "mesh_remove_islands", "arguments": {}},
+                  {"tool": "mesh_fill_holes", "arguments": curved},
+                  {"tool": "mesh_fill_holes", "arguments": {"patch": "flat", "size": round(diag, 1)}},
+                  {"tool": "mesh_export", "arguments": {"part": "edited", "path": str(self.repaired)}}]:
+            res = run(c)
+            if res is None:
+                return "\n".join(report)
+            if c["arguments"] is curved:
+                self.hole_size = getattr(self, "hole_size", None) or (res.get("edit") or {}).get("maxSize")
         solid = close_mesh(read_stl(self.repaired), grid)
         write_stl(closed, solid)
         report.append(f"closed on a {grid} mm grid: {len(solid)} triangles, {closed.name}")
