@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: AGPL-3.0-only
 """Build ground-truth parts of known design in headless ScanRuler and export each as
 STL (the input) + STEP (the truth), so the Swift pipeline can be scored against reality.
 
@@ -85,6 +85,14 @@ PARTS = {
               edges=[{"through": {"at": [15, 0, 0], "within": 0.01}}, {"through": {"at": [15, 0, 8], "within": 0.01}}]),
         ],
     },
+}
+
+
+# the bracket left at an angle, as a part exported in its assembly position: frame.py's case
+PARTS["bracket_tilted"] = {
+    "truth": dict(PARTS["bracket"]["truth"], tilt_deg=[12, -7, 20]),
+    "calls": PARTS["bracket"]["calls"] + [F(kind="moveBody", name="Tilt", bodies=["Plate"], rotate=[12, -7, 20],
+                                           pivot=[0, 0, 0], translate=[5, -3, 2])],
 }
 
 

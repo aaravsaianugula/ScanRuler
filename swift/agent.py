@@ -15,14 +15,19 @@ GATEWAY = os.environ.get("SWIFT_URL", "http://127.0.0.1:11434/v1")
 MODEL = os.environ.get("SWIFT_MODEL", "swift-1.5-qwen3.8-27b")
 PROMPTS = Path(__file__).resolve().parent / "prompts"
 CTX_TOKENS = 49152
-BUDGET = 34000          # history kept under this (est. tokens), leaving room for the reply and thinking
-PIN_BUDGET = 12000      # guide text kept verbatim
+BUDGET = 30000          # history kept under this (est. tokens), leaving room for the reply and thinking
+PIN_BUDGET = 10000      # guide text kept verbatim
 READ_ONLY = {"guide_read", "scanruler_tools", "reverse_feature_list", "reverse_feature_schema", "reverse_body_describe",
              "reverse_body_check", "reverse_parameter_list", "reverse_note_list", "session_state", "scan_query", "scan_nearest",
              "scan_qa", "scan_outline", "scan_draft", "scan_heightmap", "scan_pattern", "view_render", "section_render",
              "reverse_body_review", "reverse_body_compare", "reverse_body_volume_compare", "reverse_section_fit",
              "reverse_section_outline", "reverse_section_stack", "reverse_sketch_candidates", "reverse_body_fillet_read",
              "reverse_plane_describe", "reverse_thread_read", "report_get", "mesh_inspect", "mesh_parts", "deviation_hotspots"}
+
+
+# tools that change the scan itself: the validator must see the scan as scanned
+NO_EDIT = {"mesh_smooth", "mesh_delete_marked", "mesh_reduce", "mesh_fill_holes", "mesh_remove_islands", "mesh_cut",
+           "mesh_offset", "mesh_shell", "mesh_boolean", "mesh_use_edited", "mesh_flip_normals"}
 
 
 def tool(name, desc, props=None, req=()):
@@ -67,6 +72,24 @@ def chat(messages, tools, thinking=True, max_tokens=6000, retries=3):
             if k == retries - 1:
                 raise
             time.sleep(5 * (k + 1))
+
+
+def slim(txt):
+    """Long numeric arrays (heightmap grids, point lists) out of a tool answer: a picture or a
+    narrower query reads them better than the model's context does."""
+    def walk(v):
+        if isinstance(v, list):
+            flat = json.dumps(v)
+            if len(flat) > 400 and all(isinstance(x, (int, float, list, type(None))) for x in v):
+                return f"[{len(v)} values elided - ask for a picture or a smaller box]"
+            return [walk(x) for x in v]
+        if isinstance(v, dict):
+            return {k: walk(x) for k, x in v.items()}
+        return v
+    try:
+        return json.dumps(walk(json.loads(txt)), ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        return txt
 
 
 def est(m):
@@ -114,12 +137,31 @@ class Agent:
         return clip(p.read_text(encoding="utf-8", errors="replace"), max_chars)
 
     def t_scanruler(self, calls, stopOnError=True):
+        banned = [c.get("tool") for c in calls if c.get("tool") in NO_EDIT]
+        if banned:
+            return f"refused: {banned} edit the scan, and the model must be judged against the scan as scanned."
         if any(c.get("tool") not in READ_ONLY for c in calls):
             self.changes += 1
         for c in calls:
             c.setdefault("arguments", {})
         txt, err = self.wb.batch(calls, stopOnError=stopOnError)
-        return clip(txt, 8000)
+        out = clip(slim(txt), 6000)
+        # a call refused for its arguments: hand back that tool's schema, so the next try is right
+        try:
+            bad = {r["tool"] for r in json.loads(txt).get("results", []) if (r.get("error") or {}).get("code") == "invalid_input"}
+        except Exception:
+            bad = set()
+        if bad:
+            out += "\n\nSchemas of the refused tools:\n" + self.schemas(sorted(bad))
+        return out
+
+    def schemas(self, names):
+        txt, _, _ = self.wb.mcp.call("scanruler_tools", {"names": names})
+        try:
+            return clip(json.dumps([{"name": t["name"], "inputSchema": t["inputSchema"]} for t in json.loads(txt)["tools"]],
+                                   separators=(",", ":")), 5000)
+        except Exception:
+            return clip(txt, 5000)
 
     def t_scanruler_help(self, names=None):
         txt, _, _ = self.wb.mcp.call("scanruler_tools", {"names": names} if names else {})
@@ -152,17 +194,23 @@ class Agent:
 
     # -- loop ------------------------------------------------------------
     def compact(self, msgs):
-        """Elide old tool results (keep the newest, the pinned guide text within its budget, and the task)."""
+        """Keep the history under BUDGET: images only from the latest turn, then old tool results elided
+        oldest first (the newest guide text kept within PIN_BUDGET), the last 3 messages always whole."""
+        last_img = max((i for i, m in enumerate(msgs) if isinstance(m.get("content"), list)), default=-1)
+        for i, m in enumerate(msgs):
+            if isinstance(m.get("content"), list) and i != last_img:
+                m["content"] = "[older image elided]"
         total = sum(est(m) for m in msgs)
-        pinned_tok = 0
-        for i, m in enumerate(msgs[2:-6], start=2):
+        keep, pin = set(), 0
+        for i in sorted(self.pinned, reverse=True):       # newest guide reads first
+            if i < len(msgs) and pin + est(msgs[i]) <= PIN_BUDGET:
+                keep.add(i); pin += est(msgs[i])
+        for i, m in enumerate(msgs[2:-3], start=2):
             if total <= BUDGET:
                 break
-            if i in self.pinned:
-                pinned_tok += est(m)
-                if pinned_tok <= PIN_BUDGET:
-                    continue
             c = m.get("content")
+            if i in keep or not isinstance(c, (str, list)):
+                continue
             if m["role"] == "tool" and isinstance(c, str) and len(c) > 300:
                 total -= est(m); m["content"] = c[:240] + " ...[older result elided]"; total += est(m)
             elif m["role"] == "user" and isinstance(c, list):

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Deterministic first pass, no model: follow analyze.py's recommendation (frame, slabs or
 revolve, holes, blends), build, validate. Swift starts from here and fixes what fails."""
+import json
 import re
 
 from workbench import Workbench
@@ -9,8 +10,15 @@ from workbench import Workbench
 def first_pass(wb: Workbench, log=print):
     out = wb.script("analyze")
     log(out)
-    if "build in the STL frame" not in out and "frame.py" in out:
-        log(wb.script("frame"))     # tilted part: the skill's frame step; Swift handles the moveBody
+    move = None
+    if "recommend: frame.py" in out:
+        # tilted part (the skill's frame step): build in its own frame, turn the body back as the last feature
+        log(wb.script("frame"))
+        fr = wb.work / "data" / "frame.json"
+        if fr.exists():
+            move = json.loads(fr.read_text())
+            out = wb.script("analyze", [str(wb.work / "data" / "local.stl")])
+            log(out)
     rec = re.search(r"recommend: (\S+\.py)\s*([^\n(]*)", out)
     files = []
     if rec and rec.group(1) == "revolve.py":
@@ -30,5 +38,10 @@ def first_pass(wb: Workbench, log=print):
     log(wb.rebuild(files))
     log(wb.script("blends", ["--main", wb.main_axis, "--body", wb.body]))
     files.append("data/blends.json")
+    if move:
+        (wb.work / "data" / "frame_move.json").write_text(json.dumps({"steps": [{"name": "reverse.feature.add", "input": {
+            "feature": {"kind": "moveBody", "name": "Back to the STL frame", "bodies": [wb.body],
+                        "rotate": move["rotate"], "pivot": move["pivot"]}, "detail": "none"}}]}))
+        files.append("data/frame_move.json")
     log(wb.rebuild(files))
     return files, out

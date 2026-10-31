@@ -142,14 +142,44 @@ class Workbench:
 
     def check(self, mode="cad", noise=None):
         """Export, analyze the model, run the independent validator. The one judge of done."""
+        self.last_validation = None
         msg = self.export_model()
         if not msg.endswith("written"):
             return msg
-        self.analyze_model()
-        r = validate(self.input, self.work / "model.stl", self.work / "data", self.work / "data_model", mode, noise)
+        # the validator reads the input as it is (world frame) from a data dir of its own: the scripts'
+        # data/ may hold a local frame (frame.py) or whatever the last analyze was run on
+        if mode == "cad":
+            if not (self.work / "data_input" / "faces.json").exists():
+                self.script("analyze", [str(self.input), "--data", "data_input"])
+            self.analyze_model()
+            r = validate(self.input, self.work / "model.stl", self.work / "data_input", self.work / "data_model", mode, noise)
+        else:
+            ref = self.scan_as_posed()
+            if isinstance(ref, str):
+                return ref
+            r = validate(ref, self.work / "model.stl", None, None, mode, noise)
         self.last_validation = r
         (self.work / "validation.json").write_text(json.dumps(r, indent=1))
         return summary(r)
+
+    def scan_as_posed(self):
+        """The scan in the pose the model is built in (after align_*), proven to be the original scan
+        moved rigidly: same triangles, Kabsch residual ~0. Anything else (smoothed, trimmed) is refused."""
+        import numpy as np
+        from meshio_min import read_stl
+        path = self.work / "scan_posed.stl"
+        txt, err = self.batch([{"tool": "export_stl", "arguments": {"path": str(path)}}])
+        if err or '"ok":false' in txt:
+            return f"could not export the scan in its pose: {txt[:500]}"
+        A, B = read_stl(self.input).reshape(-1, 3), read_stl(path).reshape(-1, 3)
+        if A.shape != B.shape:
+            return "refused: the scan in ScanRuler is no longer the input scan (its triangles changed). Undo the mesh edits."
+        a0, b0 = A - A.mean(0), B - B.mean(0)
+        u, _, vt = np.linalg.svd(a0.T @ b0)
+        R = u @ np.diag([1, 1, np.sign(np.linalg.det(u @ vt))]) @ vt
+        if np.abs(a0 @ R - b0).max() > 1e-3:
+            return "refused: the scan in ScanRuler is not the input scan moved rigidly (it was edited). Undo the mesh edits."
+        return path
 
     def deliver(self, name=None):
         """STEP with read-back verify, body check, feature list; refuses without a passing validation."""

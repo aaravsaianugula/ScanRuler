@@ -74,8 +74,7 @@ def main():
             wb.close()
             wb = Workbench(stl, work, page=True, show_browser=not a.headless_browser)
             agent = Agent(wb, "scan", log=log, max_turns=a.max_turns)
-            msg = (f"Scan: {stl.name}, opened in ScanRuler. A first look by the exact-reading analyzer (it fragments on noise, "
-                   f"so only the box, frame and big planes mean anything):\n{clip(analysis, 2500)}\n\n"
+            msg = (f"Scan: {stl.name}, opened in ScanRuler (millimetres).\n{chr(10).join(analysis.splitlines()[1:4])}\n\n"
                    "Start with the guide index, then work the scan-to-cad flow until the validator passes.")
             report, failed = agent.run(msg)
             failed = failed or not agent.passed

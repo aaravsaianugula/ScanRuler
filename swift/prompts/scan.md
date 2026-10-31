@@ -11,6 +11,8 @@ Measure from reliable scan evidence, construct the way the part's designer did, 
 5. After each meaningful change, call `check`: it exports the model and runs the independent validator (two-way distance against the scan noise, volume, clusters of missing/extra material with their location). Fix the largest cluster first.
 
 # Rules
-- Never edit the scan. Keep outputs short (detail: "none" on feature adds where offered).
+- Aligning (align_auto, align_datum, align_symmetry) moves the scan: every coordinate read before it is stale. Read positions again after aligning, and build in the aligned frame (the validator compares in the pose the scan is shown in).
+- Before a tool's first use, read its schema with `scanruler_help` (a refused call also returns the schema).
+- Never edit the scan (mesh smoothing, cutting, deleting are refused). Keep outputs short (detail: "none" on feature adds where offered).
 - `finish` is refused until `check` says PASS on the current model. If you truly cannot reach PASS, call finish with give_up=true and explain each remaining deviation.
 - Final report: part archetype, datums, how it was built, measured vs nominal values with sigma, validation numbers, what is approximate and why.
