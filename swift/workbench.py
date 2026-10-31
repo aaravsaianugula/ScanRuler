@@ -3,8 +3,6 @@
 (over scanruler-mcp) and the independent validator, as plain calls. The Swift agent's tools
 and the deterministic autopilot both go through this."""
 import json
-import os
-import re
 import shutil
 import subprocess
 import sys
@@ -24,7 +22,10 @@ def clip(s, n=6000):
 
 
 class Workbench:
-    def __init__(self, stl, work=None, python=sys.executable, page=False, show_browser=True):
+    def __init__(self, stl, work=None, python=sys.executable, page=False, show_browser=True, on_link=None):
+        """page: False = headless engine; True = the ScanRuler page, opened in Edge/Chrome (page.mjs),
+        or, with on_link, handed to a host that shows it (the desktop app's live view)."""
+        self.on_link = on_link
         self.stl = Path(stl).resolve()
         self.work = Path(work).resolve() if work else self.stl.with_name(self.stl.stem + "_work")
         (self.work / "data").mkdir(parents=True, exist_ok=True)
@@ -39,6 +40,8 @@ class Workbench:
         else:
             self.mcp = ScanRulerMCP(self.work)
         self.built = []                                 # step files of the current build, in order
+        self.emit = lambda *a, **k: None                # the desktop app's event stream (run.py --events)
+        self.narrate = False                            # report scripts/builds as actions (the autopilot's; Swift's own calls report themselves)
         self.last_validation = None
         self.main_axis, self.body = "z", "Z slab 0"
 
@@ -54,9 +57,12 @@ class Workbench:
         self.mcp = ScanRulerMCP(self.work, headless=False, extra=["--serve", str(REPO / "dist"), "--port", str(port)],
                                 env={"SCANRULER_MCP_TOKEN": token, "SCANRULER_MCP_CONFIG_DIR": str(cfg)})
         link = f"http://127.0.0.1:{port}/#agent={port}:{token}"
-        self.browser = subprocess.Popen(["node", str(REPO / "swift" / "page.mjs"), link] + ([] if show else ["--headless"]),
-                                        stdin=subprocess.PIPE, cwd=str(REPO), text=True)
-        txt, _, err = self.mcp.call("scanruler_wait", {"for": "page", "timeoutSeconds": 120})
+        if self.on_link:
+            self.on_link(link)
+        else:
+            self.browser = subprocess.Popen(["node", str(REPO / "swift" / "page.mjs"), link] + ([] if show else ["--headless"]),
+                                            stdin=subprocess.PIPE, cwd=str(REPO), text=True)
+        txt, _, err = self.mcp.call("scanruler_wait", {"for": "page", "timeoutSeconds": 180})
         if err or '"connected":true' not in txt.replace(" ", ""):
             raise RuntimeError(f"the ScanRuler page did not connect: {txt[:500]}")
         txt, err = self.batch([{"tool": "scan_open", "arguments": {"path": str(self.input), "units": "mm"}}])
@@ -72,7 +78,18 @@ class Workbench:
                 self.browser.kill()
 
     # -- scripts ---------------------------------------------------------
+    def _act(self, name, args, run):
+        if not self.narrate:
+            return run()
+        self.emit("tool", name=name, args=json.dumps(args))
+        out = run()
+        self.emit("tool_result", name=name, text=str(out)[:1500])
+        return out
+
     def script(self, name, args=()):
+        return self._act("run_script", {"name": name, "args": [str(a) for a in args]}, lambda: self._script(name, args))
+
+    def _script(self, name, args=()):
         name = name.removesuffix(".py")
         if name not in ALLOWED:
             return f"refused: {name} is not one of {sorted(ALLOWED)}"
@@ -103,6 +120,9 @@ class Workbench:
 
     def rebuild(self, files):
         """Clear the part and run the step files in order. Returns a short report."""
+        return self._act("rebuild", {"files": list(files)}, lambda: self._rebuild(files))
+
+    def _rebuild(self, files):
         self.batch([{"tool": "reverse_feature_clear", "arguments": {}}])
         self.built, report = [], []
         for f in files:
@@ -123,8 +143,7 @@ class Workbench:
                 report.append(f"{f}: {txt[:600]}")
             self.built.append(f)
         txt, _ = self.batch([{"tool": "reverse_feature_list", "arguments": {}}])
-        bodies = re.findall(r'"name":"([^"]+)"[^{}]*"kind":"(?:extrude|revolve)"', txt)
-        return "\n".join(report) + (f"\nfeatures built: {len(re.findall(chr(34) + 'kind' + chr(34), txt))}" if txt else "")
+        return "\n".join(report) + (f"\nfeatures built: {txt.count(chr(34) + 'kind' + chr(34))}" if txt else "")
 
     def export_model(self, chord=0.005):
         txt, err = self.batch([{"tool": "reverse_export_stl", "arguments": {"chord": chord, "path": str(self.work / "model.stl")}}])

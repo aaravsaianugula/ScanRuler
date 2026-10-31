@@ -1,0 +1,62 @@
+{
+  "name": "scanruler-swift-studio",
+  "productName": "ScanRuler Swift Studio",
+  "version": "1.0.0",
+  "description": "Desktop app: scans in, validated CAD out â€” ScanRuler driven by Swift 1.5",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "author": "Aarav Sai Anugula",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/write-defaults.cjs && vite build && electron .",
+    "build": "node scripts/write-defaults.cjs && vite build",
+    "start": "electron .",
+    "icon": "node scripts/make-icon.mjs",
+    "dist": "npm run build && electron-builder --win"
+  },
+  "build": {
+    "appId": "dev.aarav.scanruler-swift-studio",
+    "productName": "ScanRuler Swift Studio",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**",
+      "dist/**",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "ScanRuler Swift Studio"
+    },
+    "portable": {
+      "artifactName": "ScanRulerSwiftStudio-${version}-portable.exe"
+    }
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.7.0",
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0",
+    "vite": "^6.4.5",
+    "@fontsource/jost": "^5.3.0",
+    "@fontsource/space-mono": "^5.3.0",
+    "@fontsource/vt323": "^5.3.0",
+    "border-beam": "^1.4.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "thinking-orbs": "^0.3.2",
+    "three": "^0.180.0"
+  },
+  "allowScripts": {
+    "electron@45.2.1": true
+  }
+}

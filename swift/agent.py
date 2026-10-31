@@ -56,22 +56,49 @@ CAD_TOOLS = [
 ]
 
 
-def chat(messages, tools, thinking=True, max_tokens=6000, retries=3):
+def chat(messages, tools, thinking=True, max_tokens=6000, retries=3, on_delta=None):
+    """One completion, streamed: on_delta(kind, text) sees the reasoning and the reply as they come
+    (kind "reasoning" or "content"). Returns the assembled message and the usage."""
     body = {"model": MODEL, "messages": messages, "tools": tools, "tool_choice": "auto", "max_tokens": max_tokens,
-            "chat_template_kwargs": {"enable_thinking": thinking}}
+            "chat_template_kwargs": {"enable_thinking": thinking}, "stream": True, "stream_options": {"include_usage": True}}
     # the model card's sampling, per mode
     body.update(dict(temperature=1.0, top_p=0.95, top_k=20, min_p=0, presence_penalty=0, reasoning_effort="medium") if thinking
                 else dict(temperature=0.7, top_p=0.8, top_k=20, min_p=0, presence_penalty=1.5))
     req = urllib.request.Request(f"{GATEWAY}/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"})
     for k in range(retries):
         try:
-            with urllib.request.urlopen(req, timeout=1800) as r:
-                res = json.loads(r.read())
-            return res["choices"][0]["message"], res.get("usage", {})
-        except Exception as e:  # the Gateway queues behind Sena's live turns; a dropped call is retried
+            return _read_stream(urllib.request.urlopen(req, timeout=1800), on_delta or (lambda *_: None))
+        except Exception:  # the Gateway queues behind Sena's live turns; a dropped call is retried
             if k == retries - 1:
                 raise
             time.sleep(5 * (k + 1))
+
+
+def _read_stream(resp, on_delta):
+    content, calls, usage = [], {}, {}
+    with resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:") or line == "data: [DONE]":
+                continue
+            chunk = json.loads(line[5:])
+            usage = chunk.get("usage") or usage
+            for ch in chunk.get("choices", []):
+                d = ch.get("delta", {})
+                if d.get("reasoning_content"):
+                    on_delta("reasoning", d["reasoning_content"])
+                if d.get("content"):
+                    content.append(d["content"]); on_delta("content", d["content"])
+                for tc in d.get("tool_calls") or []:
+                    c = calls.setdefault(tc.get("index", 0), {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                    c["id"] = tc.get("id") or c["id"]
+                    f = tc.get("function") or {}
+                    c["function"]["name"] += f.get("name") or ""
+                    c["function"]["arguments"] += f.get("arguments") or ""
+    msg = {"role": "assistant", "content": "".join(content)}
+    if calls:
+        msg["tool_calls"] = [calls[i] for i in sorted(calls)]
+    return msg, usage
 
 
 def slim(txt):
@@ -99,8 +126,9 @@ def est(m):
 
 
 class Agent:
-    def __init__(self, wb: Workbench, mode, log=print, max_turns=60):
+    def __init__(self, wb: Workbench, mode, log=print, max_turns=60, emit=None):
         self.wb, self.mode, self.log, self.max_turns = wb, mode, log, max_turns
+        self.emit = emit or (lambda *a, **k: None)     # the desktop app's event stream
         self.tools = COMMON + (CAD_TOOLS if mode == "cad" else [])
         self.changes = 0            # bumped by anything that may change the model
         self.checked_at = -1        # self.changes when the last check ran
@@ -114,6 +142,7 @@ class Agent:
         r = self.wb.last_validation
         self.checked_at = self.changes
         self.passed = bool(r and r["verdict"] == "PASS")
+        self.emit("validation", result=r, summary=out)
         if r:
             score = (sum(not v for v in r["checks"].values()), max(r["input_to_model"]["p95"], r["model_to_input"]["p95"]))
             if self.best is None or score < self.best[0]:
@@ -216,12 +245,33 @@ class Agent:
             elif m["role"] == "user" and isinstance(c, list):
                 total -= est(m); m["content"] = "[older image elided]"; total += est(m)
 
+    def _stream(self):
+        """on_delta for chat(): batches tokens into events of ~60 chars or 0.1 s, so the app sees the
+        reasoning live without an event per token."""
+        buf = {"reasoning": [], "content": []}
+        last = [time.time()]
+
+        def flush(kind):
+            if buf[kind]:
+                self.emit(kind, delta="".join(buf[kind])); buf[kind].clear()
+
+        def on_delta(kind, text):
+            buf[kind].append(text)
+            if sum(map(len, buf[kind])) > 60 or time.time() - last[0] > 0.1:
+                flush("reasoning"); flush("content"); last[0] = time.time()
+        on_delta.flush = lambda: (flush("reasoning"), flush("content"))
+        return on_delta
+
     def run(self, first_message):
         sys_prompt = (PROMPTS / f"{self.mode}.md").read_text(encoding="utf-8")
         msgs = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": first_message}]
         for turn in range(self.max_turns):
             self.compact(msgs)
-            msg, usage = chat(msgs, self.tools)
+            self.emit("turn", n=turn, max=self.max_turns, context=int(sum(est(m) for m in msgs)), limit=CTX_TOKENS)
+            stream = self._stream()
+            msg, usage = chat(msgs, self.tools, on_delta=stream)
+            stream.flush()
+            self.emit("turn_end", n=turn, prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens"))
             calls = msg.get("tool_calls") or []
             msgs.append({"role": "assistant", "content": msg.get("content") or "", **({"tool_calls": calls} if calls else {})})
             self.log(f"[swift {turn}] prompt {usage.get('prompt_tokens')} tok; " + (msg.get("content") or "")[:400].replace("\n", " ")
@@ -232,6 +282,7 @@ class Agent:
             images = []
             for c in calls:
                 name = c["function"]["name"]
+                self.emit("tool", name=name, args=c["function"].get("arguments", "")[:2000])
                 try:
                     args = json.loads(c["function"].get("arguments") or "{}")
                 except json.JSONDecodeError as e:
@@ -250,13 +301,15 @@ class Agent:
                             out = f"{name} failed: {type(e).__name__}: {e}"
                     if name == "finish" and out is None:
                         return args.get("report", ""), args.get("give_up", False) or not self.passed
-                    if name == "view_image":
+                    if name == "view_image" and isinstance(out, tuple):
                         out, img = out
                         if img:
                             images.append(img)
+                            self.emit("image", path=str((self.wb.work / args.get("path", "")).resolve()))
                 if name == "guide":
                     self.pinned.add(len(msgs))
                 self.log(f"   <- {name}: {str(out)[:600]}")
+                self.emit("tool_result", name=name, text=str(out)[:1500])
                 msgs.append({"role": "tool", "tool_call_id": c.get("id", name), "content": str(out)})
             for img in images:      # vision goes in a user turn: tool messages carry text only
                 msgs.append({"role": "user", "content": [{"type": "text", "text": "The image you asked for:"},
