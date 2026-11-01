@@ -36,6 +36,13 @@ on_sphere = (tid < len(sphere)) | (tid >= len(scan) - len(void))
 assert on[on_sphere].mean() > 0.97 and on[~on_sphere].mean() < 0.05, (on[on_sphere].mean(), on[~on_sphere].mean())
 print("ok", len(solid), "triangles, volume", round(v, 1))
 
+# reduced, it stays closed, no wall cuts through another and the cavity still faces in
+from organic_solid import indexed, reduce_mesh, self_intersecting  # noqa: E402
+small = reduce_mesh(solid, 3000)
+assert len(small) < 0.3 * len(solid) and edge_counts(small) == (0, 0), (len(small), edge_counts(small))
+assert not self_intersecting(*indexed(small)).any() and abs(volume(small) - v) < 0.01 * v, volume(small)
+print("ok reduce_mesh", len(small), "triangles")
+
 # the model-type detector run.py's auto mode uses: a sphere is free-form, a cube is engineered
 import tempfile  # noqa: E402
 from meshio_min import write_stl  # noqa: E402

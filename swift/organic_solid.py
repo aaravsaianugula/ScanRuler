@@ -58,10 +58,15 @@ def orient(parts):
 
 
 def grid_for(tris):
-    """The grid step: about 1/1100 of the part's diagonal (0.3 mm on a 33 cm figurine), never under 0.05 mm,
-    and coarse enough that the grid stays under ~250 M points (a few minutes)."""
+    """The grid step: half the scan's median edge - the closing rounds every edge and thin fin by about a cell,
+    and a cell under the scan's own spacing has nothing more to follow - kept between 1/1650 and 1/1100 of the
+    part's diagonal, never under 0.05 mm, and coarse enough that the grid stays under ~1 G points (about ten
+    minutes). A 33 cm figurine scanned at 0.46 mm closes on 0.2 mm (scan->solid rms 0.039, 0.049 on 0.3 mm);
+    a coarse 52k-triangle scan stays on 1/1100, where a finer grid bought nothing but triangles."""
     ext = np.ptp(tris.reshape(-1, 3), axis=0)
-    return float(max(0.05, np.linalg.norm(ext) / 1100, (np.prod(ext + 1) / 2.5e8) ** (1 / 3)))
+    diag = np.linalg.norm(ext)
+    edge = float(np.median(np.linalg.norm(tris - np.roll(tris, 1, axis=1), axis=2)))
+    return float(max(0.05, diag / 1650, min(diag / 1100, edge / 2.25), (np.prod(ext + 1) / 1e9) ** (1 / 3)))
 
 
 def close_mesh(tris, h=None, slab=24):
@@ -94,7 +99,8 @@ def close_mesh(tris, h=None, slab=24):
     # a shell facing in is a sealed cavity - a crevice where an arm presses on the body, closed at its mouth -
     # and stays: its walls are scanned surface; but one under two cells thick (2 volume / area) is a sliver
     # where the distance hovers at zero, and reduction would push its walls through the body's: filled.
-    # A speck under three cells across is a bubble where a noisy scan's winding number flickers past 1/2.
+    # A speck under eight cells across is a bubble where a noisy scan's winding number flickers past 1/2, or
+    # one caught between two scan layers a fraction of a mm apart (Frieren: some 200, loose debris in a print).
     # Thin slivers larger than that follow scanned surface (a base's rim lip) and stay, as pieces of their own
     n = len(v)
     adj = coo_matrix((np.ones(3 * len(f)), (f.ravel(), np.roll(f, 1, axis=1).ravel())), shape=(n, n))
@@ -105,18 +111,54 @@ def close_mesh(tris, h=None, slab=24):
     np.maximum.at(hi, comp, out.max(1))
     vol = np.bincount(comp, weights=np.einsum("ij,ij->i", out[:, 0], np.cross(out[:, 1], out[:, 2])) / 6)
     area = np.bincount(comp, weights=0.5 * np.linalg.norm(np.cross(out[:, 1] - out[:, 0], out[:, 2] - out[:, 0]), axis=1))
-    keep = (np.linalg.norm(hi - lo, axis=1) >= 3 * h) & ((vol > 0) | (-2 * vol / area >= 2 * h))
+    keep = (np.linalg.norm(hi - lo, axis=1) >= 8 * h) & ((vol > 0) | (-2 * vol / area >= 2 * h))
     return out[keep[comp]]
 
 
-def reduce_mesh(tris, faces):
-    """Quadric decimation to faces triangles that keeps a closed manifold one (MeshLab, preservetopology).
-    ScanRuler's mesh.reduce is not used here: on a dense closed scan it leaves non-manifold edges."""
+def self_intersecting(v, f):
+    """Which faces cut through another face of the mesh (MeshLab)."""
     import pymeshlab
-    v, f = indexed(tris)
     ms = pymeshlab.MeshSet()
     ms.add_mesh(pymeshlab.Mesh(v, f))
-    ms.meshing_decimation_quadric_edge_collapse(targetfacenum=int(faces), qualitythr=0.5, preserveboundary=True, preservenormal=True,
-                                                preservetopology=True, optimalplacement=True, planarquadric=True)
-    m = ms.current_mesh()
-    return m.vertex_matrix()[m.face_matrix()]
+    ms.compute_selection_by_self_intersections_per_face()
+    return ms.current_mesh().face_selection_array()
+
+
+def reduce_mesh(tris, faces, passes=12):
+    """Quadric decimation to about faces triangles that keeps a closed manifold one (MeshLab, preservetopology).
+    ScanRuler's mesh.reduce is not used here: on a dense closed scan it leaves non-manifold edges.
+    Decimation knows nothing of the other side of a thin wall (a hair tip, a finger on the staff): collapses
+    there push one wall through the other, and a small shell can turn inside out - surface showing its back.
+    Where that happens the dense mesh around it is kept out of the decimation and it runs again."""
+    import pymeshlab
+    from scipy.spatial import cKDTree
+    if len(tris) > 6 * faces:      # in stages: what is kept out of the last one is then 3x coarser than the closing's cells
+        tris = reduce_mesh(tris, 3 * faces, passes)
+    v, f = indexed(tris)
+    keep, tree = np.zeros(len(v), bool), cKDTree(v)
+    tries = np.zeros(len(v), int)          # how often a spot came back: its keep widens only there
+    signed = lambda t: np.einsum("ij,ij->i", t[:, 0], np.cross(t[:, 1], t[:, 2])).sum()
+    cavities = [(p.reshape(-1, 3).min(0), p.reshape(-1, 3).max(0)) for p in pieces(tris) if signed(p) < 0]
+    for _ in range(passes):
+        ms = pymeshlab.MeshSet()
+        ms.add_mesh(pymeshlab.Mesh(v, f, f_scalar_array=(~keep[f].any(1)).astype(float)))
+        ms.compute_selection_by_condition_per_face(condselect="fq > 0.5")
+        ms.meshing_decimation_quadric_edge_collapse(targetfacenum=int(faces), qualitythr=0.5, preserveboundary=True, preservenormal=True,
+                                                    preservetopology=True, optimalplacement=True, planarquadric=True, selected=True)
+        m = ms.current_mesh()
+        rv, rf = m.vertex_matrix(), m.face_matrix()
+        out = rv[rf]
+        bad = list(out[self_intersecting(rv, rf)])
+        # a shell turned inside out: negative, and not where the dense mesh has a cavity
+        bad += [p for p in pieces(out) if signed(p) < 0 and not any(((p.mean((0, 1)) >= lo) & (p.mean((0, 1)) <= hi)).all() for lo, hi in cavities)]
+        if not bad:
+            return out
+        before = tries.copy()
+        for t in bad:      # a face, or a whole shell; twice as wide where it comes back: at worst all is kept, and the dense mesh is clean
+            p = t.reshape(-1, 3)
+            r = np.linalg.norm(t.reshape(-1, 3, 3) - np.roll(t.reshape(-1, 3, 3), 1, axis=1), axis=2).max()
+            n = before[tree.query(p.mean(0))[1]]
+            ball = tree.query_ball_point(p.mean(0), max(min(3.0, r) * 2 ** n, np.ptp(p, axis=0).max()))
+            keep[ball] = True
+            tries[ball] = np.maximum(tries[ball], n + 1)
+    raise RuntimeError(f"reduce_mesh: {len(bad)} faces or shells still cut through or turned after {passes} passes")
