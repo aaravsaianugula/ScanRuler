@@ -27,6 +27,12 @@ def indexed(tris, decimals=6):
     return v, f[keep]
 
 
+def num(x, decimals):
+    """A STEP real in its shortest exact form at that many decimals: 12.5, not 12.500000 (a third of the file)."""
+    s = f"{x:.{decimals}f}".rstrip("0")
+    return "0." if s in ("-0.", "0.") else s
+
+
 def solid_pieces(v, f):
     """The closed shells of an indexed mesh: a body in several pieces is a solid per piece, and a piece
     facing in (a sealed cavity) is a void of the smallest solid around it. Returns f with cavities turned to
@@ -93,32 +99,33 @@ def write_step(path, tris, name="Body", bodies=None):
         f, comp, cvol, solids, voids, lost = solid_pieces(v, f)
         # real topology, not POLY_LOOPs: a face per triangle, but one edge per mesh edge shared by its two
         # faces, so a reader gets one connected closed shell (OCCT splits a POLY_LOOP shell into many solids)
-        pt = [ent(f"CARTESIAN_POINT('',({p[0]:.6f},{p[1]:.6f},{p[2]:.6f}))") for p in v]
+        pt = [ent(f"CARTESIAN_POINT('',({num(p[0], 6)},{num(p[1], 6)},{num(p[2], 6)}))") for p in v]
+        dirs = {}
+
+        def direction(d):       # one entity per distinct direction: a flat face's triangles share theirs
+            key = f"({num(d[0], 9)},{num(d[1], 9)},{num(d[2], 9)})"
+            if key not in dirs:
+                dirs[key] = ent(f"DIRECTION('',{key})")
+            return dirs[key]
         vx = [ent(f"VERTEX_POINT('',#{i})") for i in pt]
         he = np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])            # half-edges, face-major by corner
         und, e_of = np.unique(np.sort(he, axis=1), axis=0, return_inverse=True)
         e_of = e_of.ravel()
         edge = []
-        for a, b in und:
-            d = v[b] - v[a]
-            ln = float(np.linalg.norm(d))
-            d = d / ln
-            line = ent(f"LINE('',#{pt[a]},#{ent(f'VECTOR({chr(39)}{chr(39)},#{ent(f'DIRECTION({chr(39)}{chr(39)},({d[0]:.9f},{d[1]:.9f},{d[2]:.9f}))')},{ln:.6f})')})")
-            edge.append(ent(f"EDGE_CURVE('',#{vx[a]},#{vx[b]},#{line},.T.)"))
+        # an edge's curve is a two-point POLYLINE on the vertices' own points: one entity, where a LINE takes
+        # three (its VECTOR and DIRECTION), and exact by construction
+        edge = [ent(f"EDGE_CURVE('',#{vx[a]},#{vx[b]},#{ent(f'POLYLINE({chr(39)}{chr(39)},(#{pt[a]},#{pt[b]}))')},.T.)") for a, b in und]
         nrm = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
         nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-300
-        ref = v[f[:, 1]] - v[f[:, 0]]
-        ref /= np.linalg.norm(ref, axis=1, keepdims=True) + 1e-300
         nf, faces = len(f), []
-        for i, ((a, b, c), nn, rr) in enumerate(zip(f, nrm, ref)):
+        for i, ((a, b, c), nn) in enumerate(zip(f, nrm)):
             oe = []
             for k, (s, t) in enumerate(((a, b), (b, c), (c, a))):
                 oe.append(ent(f"ORIENTED_EDGE('',*,*,#{edge[e_of[k * nf + i]]},{'.T.' if s < t else '.F.'})"))
             loop = ent("EDGE_LOOP('',(" + ",".join(f"#{j}" for j in oe) + "))")
             bound = ent(f"FACE_OUTER_BOUND('',#{loop},.T.)")
-            dn = ent(f"DIRECTION('',({nn[0]:.9f},{nn[1]:.9f},{nn[2]:.9f}))")
-            dr = ent(f"DIRECTION('',({rr[0]:.9f},{rr[1]:.9f},{rr[2]:.9f}))")
-            pl = ent(f"PLANE('',#{ent(f'AXIS2_PLACEMENT_3D({chr(39)}{chr(39)},#{pt[a]},#{dn},#{dr})')})")
+            # no ref_direction ($, optional): a plane's in-plane axes are the reader's to choose
+            pl = ent(f"PLANE('',#{ent(f'AXIS2_PLACEMENT_3D({chr(39)}{chr(39)},#{pt[a]},#{direction(nn)},$)')})")
             faces.append(ent(f"ADVANCED_FACE('',(#{bound}),#{pl},.T.)"))
         shell = {c: ent("CLOSED_SHELL('',(" + ",".join(f"#{faces[i]}" for i in np.flatnonzero(comp == c)) + "))") for c in np.unique(comp)}
         breps = []
