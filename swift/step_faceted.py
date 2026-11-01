@@ -98,10 +98,12 @@ def write_step(path, tris, name="Body"):
     solids = [c for c in shell if cvol[c] > 0]
     voids, lost = {c: [] for c in solids}, 0
     for c in shell:
-        if cvol[c] < 0:     # in the smallest solid around it (winding number at one of its corners)
+        if cvol[c] < 0:     # in the smallest solid around it: all its corners inside that, none of that's inside it
             import igl
-            p = v[f[comp == c][0, 0]][None]
-            around = [s for s in solids if igl.fast_winding_number(v, f[comp == s].astype(np.int64), p)[0] > 0.5]
+            p = v[np.unique(f[comp == c])]
+            cav = f[comp == c].astype(np.int64)                 # reversed above: faces out of the cavity, a solid of its own
+            around = [s for s in solids if (igl.fast_winding_number(v, f[comp == s].astype(np.int64), p) > 0.5).all()
+                      and not (igl.fast_winding_number(v, cav, v[np.unique(f[comp == s])]) > 0.5).any()]
             if around:
                 voids[min(around, key=lambda s: cvol[s])].append(ent(f"ORIENTED_CLOSED_SHELL('',*,#{shell[c]},.F.)"))
             else:       # a cavity no solid holds (it crosses one's wall): left out, and said
