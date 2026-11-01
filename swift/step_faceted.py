@@ -55,6 +55,16 @@ def write_step(path, tris, name="Body"):
     z = ent("DIRECTION('',(0.,0.,1.))")
     x = ent("DIRECTION('',(1.,0.,0.))")
     axis = ent(f"AXIS2_PLACEMENT_3D('',#{o},#{z},#{x})")
+    # a closed shell is one connected piece: a body in several pieces is a solid per piece, and a piece
+    # facing in (a sealed cavity) is a void of the piece around it - written as a shell facing out, reversed
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    adj = coo_matrix((np.ones(3 * len(f)), (f.ravel(), np.roll(f, 1, axis=1).ravel())), shape=(len(v), len(v)))
+    comp = connected_components(adj, directed=False)[1][f[:, 0]]
+    t = v[f]
+    cvol = np.bincount(comp, weights=np.einsum("ij,ij->i", t[:, 0], np.cross(t[:, 1], t[:, 2])))
+    hollow = cvol[comp] < 0
+    f = np.where(hollow[:, None], f[:, ::-1], f)
     # real topology, not POLY_LOOPs: a face per triangle, but one edge per mesh edge shared by its two
     # faces, so a reader gets one connected closed shell (OCCT splits a POLY_LOOP shell into many solids)
     pt = [ent(f"CARTESIAN_POINT('',({p[0]:.6f},{p[1]:.6f},{p[2]:.6f}))") for p in v]
@@ -84,22 +94,28 @@ def write_step(path, tris, name="Body"):
         dr = ent(f"DIRECTION('',({rr[0]:.9f},{rr[1]:.9f},{rr[2]:.9f}))")
         pl = ent(f"PLANE('',#{ent(f'AXIS2_PLACEMENT_3D({chr(39)}{chr(39)},#{pt[a]},#{dn},#{dr})')})")
         faces.append(ent(f"ADVANCED_FACE('',(#{bound}),#{pl},.T.)"))
-    # a closed shell is one connected piece: a body in several pieces is a solid per piece
-    from scipy.sparse import coo_matrix
-    from scipy.sparse.csgraph import connected_components
-    adj = coo_matrix((np.ones(3 * nf), (f.ravel(), np.roll(f, 1, axis=1).ravel())), shape=(len(v), len(v)))
-    comp = connected_components(adj, directed=False)[1][f[:, 0]]
+    shell = {c: ent("CLOSED_SHELL('',(" + ",".join(f"#{faces[i]}" for i in np.flatnonzero(comp == c)) + "))") for c in np.unique(comp)}
+    solids = [c for c in shell if cvol[c] > 0]
+    voids = {c: [] for c in solids}
+    for c in shell:
+        if cvol[c] < 0:     # in the smallest solid around it (winding number at one of its corners)
+            import igl
+            p = v[f[comp == c][0, 0]][None]
+            around = [s for s in solids if igl.fast_winding_number(v, f[comp == s].astype(np.int64), p)[0] > 0.5]
+            if around:
+                voids[min(around, key=lambda s: cvol[s])].append(ent(f"ORIENTED_CLOSED_SHELL('',*,#{shell[c]},.F.)"))
     breps = []
-    for k, c in enumerate(np.unique(comp)):
-        shell = ent("CLOSED_SHELL('',(" + ",".join(f"#{faces[i]}" for i in np.flatnonzero(comp == c)) + "))")
-        breps.append(ent(f"MANIFOLD_SOLID_BREP('{name}{'' if k == 0 else f' {k + 1}'}',#{shell})"))
+    for k, c in enumerate(solids):
+        label = f"{name}{'' if k == 0 else f' {k + 1}'}"
+        breps.append(ent(f"BREP_WITH_VOIDS('{label}',#{shell[c]},(" + ",".join(f"#{o}" for o in voids[c]) + "))") if voids[c]
+                     else ent(f"MANIFOLD_SOLID_BREP('{label}',#{shell[c]})"))
     rep = ent("ADVANCED_BREP_SHAPE_REPRESENTATION('',(" + ",".join(f"#{b}" for b in breps) + f",#{axis}),#{ctx})")
     ent(f"SHAPE_DEFINITION_REPRESENTATION(#{pds},#{rep})")
     head = ["ISO-10303-21;", "HEADER;", "FILE_DESCRIPTION(('faceted solid from a repaired scan'),'2;1');",
             f"FILE_NAME('{Path(path).name}','{now}',(''),(''),'scanruler-swift','scanruler-swift','');",
             "FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));", "ENDSEC;", "DATA;"]
     Path(path).write_text("\n".join(head + lines + ["ENDSEC;", "END-ISO-10303-21;", ""]), encoding="ascii")
-    return dict(vertices=len(v), faces=len(f), solids=len(breps))
+    return dict(vertices=len(v), faces=len(f), solids=len(breps), voids=sum(map(len, voids.values())))
 
 
 def main():

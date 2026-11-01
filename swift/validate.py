@@ -175,6 +175,19 @@ def sample(tris, spacing, return_tri=False, seed=1):
     return (pts, tid) if return_tri else pts
 
 
+def sample_area(tris, n, seed=1):
+    """n points spread over the surface in proportion to area - each stands for area/n of it, which
+    sample()'s one-per-triangle floor breaks where triangles are small (a reduced mesh's details)."""
+    a = 0.5 * np.linalg.norm(np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0]), axis=1)
+    rng = np.random.default_rng(seed)
+    tid = rng.choice(len(tris), n, p=a / a.sum())
+    r = rng.random((n, 2))
+    flip = r.sum(1) > 1
+    r[flip] = 1 - r[flip]
+    t = tris[tid]
+    return t[:, 0] + (t[:, 1] - t[:, 0]) * r[:, :1] + (t[:, 2] - t[:, 0]) * r[:, 1:], tid
+
+
 def volume(tris):
     return float(np.einsum("ij,ij->i", tris[:, 0], np.cross(tris[:, 1], tris[:, 2])).sum() / 6)
 
@@ -350,40 +363,48 @@ def enclosing(tris, pts, tid, eps=0.05):
     return (igl.fast_winding_number(v, f, pts - eps * nrm) > 0.75) & (igl.fast_winding_number(v, f, pts + eps * nrm) < 0.25)
 
 
-def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000):
+def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed=None, grid=None):
     """The organic route's gate: the delivered solid (reduced) is the scan, closed, within the scan's own
     noise (the scan-mode rule). The max is judged by area, not by its one worst point: at most a thousandth
     of the measured surface past the max tolerance, and none of it in a band (a connected region) larger
     than scan mode's systematic band - a crevice sealed shut or an unscanned mouth is a few mm2. Distances are measured only where the scan has surface that bounds a
     volume: islands the repair removed, holes it filled (no scan under them) and single sheets (flaps,
-    stray inner layers) are reported as areas, not counted as error."""
+    stray inner layers) are reported as areas, not counted as error. So is surface the closing bridged
+    (closed: the unreduced closed mesh, grid: its step): marching cubes on a distance field lays surface
+    within a fraction of a cell of the scan wherever there is scan, so closed surface over a cell from it
+    spans a gap with no scan in it - a crevice's mouth, the gap between two scan layers - like a filled hole."""
     A, R0, R = read_stl(inp), read_stl(repaired), read_stl(reduced)
     size = float(np.linalg.norm(np.ptp(A.reshape(-1, 3), axis=0)))
     spacing = max(0.1, size / 600)
     noise = estimate_noise(A, 0.3)          # 1.5 mm patches: wider ones measure a figurine's curvature, not its noise
-    rng = np.random.default_rng(0)
-    cap = lambda n: rng.choice(n, max_points, replace=False) if n > max_points else np.arange(n)
+    area = lambda T: float(0.5 * np.linalg.norm(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), axis=1).sum())
+    count = lambda T: int(min(max_points, max(1000, area(T) / spacing ** 2)))
     # a repaired triangle is the scan's own when the scan has that very triangle (filling adds new ones)
     q = np.round(np.concatenate([A.reshape(-1, 3), R0.reshape(-1, 3)]) * 1e4).astype(np.int64)
     _, inv = np.unique(q, axis=0, return_inverse=True)
     _, key = np.unique(np.sort(inv.ravel().reshape(-1, 3), axis=1), axis=0, return_inverse=True)
     key = key.ravel()
     own, kept = np.isin(key[len(A):], key[:len(A)]), np.isin(key[:len(A)], key[len(A):])
-    area = lambda T: float(0.5 * np.linalg.norm(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), axis=1).sum())
 
-    pr, tr = sample(R0, spacing, return_tri=True)
-    k = cap(len(pr))
-    pr, tr = pr[k], tr[k]
+    pr, tr = sample_area(R0, count(R0))
     scanned = own[tr]
     bounding = enclosing(R0, pr, tr)
     pa = pr[scanned & bounding]
     d_ar, sg_ar = MeshDistance(R, spacing)(pa)
-    pb = sample(R, spacing)
-    pb = pb[cap(len(pb))]
+    pb, _ = sample_area(R, count(R), seed=2)
     d_ra, sg = MeshDistance(A, spacing)(pb)
     near = MeshDistance(R0, spacing)
     near(pb)
     supported = own[near.last_tri]                          # over scan surface, not over a filled hole
+    bridged_mm2 = 0.0
+    if closed is not None:
+        import igl
+        C = read_stl(closed)
+        v, inv = np.unique(R0.reshape(-1, 3), axis=0, return_inverse=True)
+        gap = igl.signed_distance(C.mean(1), v, inv.reshape(-1, 3).astype(np.int64), igl.SignedDistanceType.SIGNED_DISTANCE_TYPE_UNSIGNED)[0] > grid
+        bridged_mm2 = area(C[gap])
+        on_gap = gap[cKDTree(C.mean(1)).query(pb)[1]]
+        supported &= ~on_gap
     s_ar, s_ba = stats(d_ar), stats(d_ra[supported])
     open_e, nonman = edge_counts(R)
     tolr = dict(rms=max(tol, 1.25 * noise + 0.01), p95=2.5 * noise + 0.02, p99=3.5 * noise + 0.03, max=8 * noise + 0.2,
@@ -415,7 +436,7 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000):
         sheet_share=round(float((scanned & ~bounding).sum() / max(1, scanned.sum())), 4),
         past_max_mm2={k: round(v, 1) for k, v in past.items()},
         past_max_share=dict(scan=round(past["scan"] / max(measured_a, 1e-9), 5), solid=round(past["solid"] / max(measured_b, 1e-9), 5)),
-        largest_band_mm2=max(bands, default=0.0), min_band_mm2=round(min_band, 1),
+        largest_band_mm2=max(bands, default=0.0), min_band_mm2=round(min_band, 1), bridged_mm2=round(bridged_mm2, 1),
     )
 
 
@@ -428,7 +449,8 @@ def summary(r):
             f"solid: {r['solid']['triangles']} faces, open edges {r['solid']['open_edges']}, non-manifold {r['solid']['nonmanifold_edges']}, volume {r['volume']['model']:.1f} mm3",
             f"noise sigma {r['noise']:.4f}: tolerances rms {r['tolerances']['rms']:.3f} p99 {r['tolerances']['p99']:.3f} max {r['tolerances']['max']:.3f}",
             f"filled holes {r['filled_area_mm2']} mm2, removed islands {r['removed_area_mm2']} mm2, "
-            f"single sheets {r['sheet_area_mm2']} mm2 ({100 * r['sheet_share']:.1f} % of the scan: no closed solid lies on them, not measured)",
+            f"single sheets {r['sheet_area_mm2']} mm2 ({100 * r['sheet_share']:.1f} % of the scan: no closed solid lies on them, not measured), "
+            f"gaps bridged by the closing {r.get('bridged_mm2', 0)} mm2 (no scan there, not measured)",
             f"past max {r['tolerances']['max']:.3f}: scan {r['past_max_mm2']['scan']} mm2 ({100 * r['past_max_share']['scan']:.3f} %), "
             f"solid {r['past_max_mm2']['solid']} mm2 ({100 * r['past_max_share']['solid']:.3f} %) of 0.1 % allowed; "
             f"largest band {r['largest_band_mm2']} mm2 of {r['min_band_mm2']} allowed",

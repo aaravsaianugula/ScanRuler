@@ -10,12 +10,11 @@ import hashlib
 import os
 import sys
 
-import igl
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from meshio_min import write_stl  # noqa: E402
-from validate import volume  # noqa: E402
+from organic_solid import orient  # noqa: E402
 
 
 def read_obj(path):
@@ -29,27 +28,6 @@ def read_obj(path):
     v, f = np.array(v, float), np.array(f)
     f = np.where(f < 0, f + len(v), f - 1)
     return v[f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 2] != f[:, 0])]]
-
-
-def orient(parts):
-    """A part that encloses volume faces out when its volume about its own centre is positive. A thin shell
-    (a fringe of hair, a ribbon) encloses next to none: it faces away from the body the others make."""
-    sure = lambda t: abs(volume(t - t.reshape(-1, 3).mean(0))) > 0.02 * np.prod(np.ptp(t.reshape(-1, 3), axis=0))
-    out = [t if not sure(t) or volume(t - t.reshape(-1, 3).mean(0)) > 0 else t[:, ::-1] for t in parts]
-    body = np.concatenate([t for t, p in zip(out, parts) if sure(p)])
-    v, inv = np.unique(body.reshape(-1, 3), axis=0, return_inverse=True)
-    f = inv.reshape(-1, 3).astype(np.int64)
-    for i, t in enumerate(out):
-        if sure(parts[i]):
-            continue
-        n = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
-        n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-20
-        c = t.mean(1)
-        into_front = (igl.fast_winding_number(v, f, c + 2 * n) > 0.5).sum()
-        into_back = (igl.fast_winding_number(v, f, c - 2 * n) > 0.5).sum()
-        if into_front > into_back:
-            out[i] = t[:, ::-1]
-    return out
 
 
 def merge(folder):

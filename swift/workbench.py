@@ -168,7 +168,7 @@ class Workbench:
         if mode == "organic":
             if not getattr(self, "reduced", None) or not self.reduced.exists():
                 return "no organic solid yet: run the organic route first"
-            r = validate_organic(self.input, self.repaired, self.reduced)
+            r = validate_organic(self.input, self.repaired, self.reduced, closed=self.closed, grid=self.grid)
             self.last_validation = r
             (self.work / "validation.json").write_text(json.dumps(r, indent=1))
             return summary(r)
@@ -191,13 +191,15 @@ class Workbench:
         (self.work / "validation.json").write_text(json.dumps(r, indent=1))
         return summary(r)
 
-    def organic(self, max_triangles=150000, grid=0.3):
+    def organic(self, max_triangles=150000, grid=None):
         """The organic route (a figurine, a sculpture - no analytic faces to rebuild): repair the scan
         in ScanRuler's mesh tools (islands off, holes filled: small ones curved, the rest flat), close what
-        the filler could not (organic_solid: winding number + marching cubes on a grid mm, sealed voids
-        dropped), reduce it to max_triangles keeping it closed, and write it as a closed STEP solid. The
+        the filler could not (organic_solid: winding number + marching cubes on a grid mm - about 1/1100 of
+        the part by default - pieces turned to face out, sealed crevices kept as cavities, sub-grid specks dropped; a scan that
+        encloses no volume is thickened in ScanRuler first), reduce it to max_triangles keeping it closed, and
+        write it as a closed STEP solid. The
         validator holds it to the scan's noise, whatever the caller asks for. Needs the page."""
-        from organic_solid import close_mesh, reduce_mesh
+        from organic_solid import close_mesh, grid_for, reduce_mesh
         from meshio_min import write_stl
         from step_faceted import write_step
         stem = self.stl.stem
@@ -233,9 +235,22 @@ class Workbench:
                 return "\n".join(report)
             if c["arguments"] is curved:
                 self.hole_size = getattr(self, "hole_size", None) or (res.get("edit") or {}).get("maxSize")
-        solid = close_mesh(read_stl(self.repaired), grid)
+        scan = read_stl(self.repaired)
+        grid = grid or grid_for(scan)
+        solid = close_mesh(scan, grid)
+        if not len(solid):
+            # the scan encloses no volume - one side of a part, a relief, a face: ScanRuler gives it thickness
+            report.append("the repaired scan encloses no volume (a single open sheet): thickening it")
+            if run({"tool": "mesh_shell", "arguments": {"mode": "thicken", "side": "in"}}) is None or \
+                    run({"tool": "mesh_export", "arguments": {"part": "edited", "path": str(self.repaired)}}) is None:
+                return "\n".join(report)
+            solid = close_mesh(read_stl(self.repaired), grid)
+            if not len(solid):
+                report.append("FAILED: still no volume after thickening")
+                return "\n".join(report)
         write_stl(closed, solid)
-        report.append(f"closed on a {grid} mm grid: {len(solid)} triangles, {closed.name}")
+        self.closed, self.grid = closed, grid      # the validator tells bridged gaps from them
+        report.append(f"closed on a {grid:.3g} mm grid: {len(solid)} triangles, {closed.name}")
         write_stl(self.reduced, reduce_mesh(solid, max_triangles))
         report.append(f"reduced to {max_triangles} triangles (MeshLab quadric, topology kept): {self.reduced.name}")
         info = write_step(self.organic_step, read_stl(self.reduced), stem)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """close_mesh and enclosing on a scan-like sphere: a hole in it, a stray sheet inside, a flap outside, a
-sealed void (a small sphere facing in). The solid must come out closed and manifold at the full sphere's
-volume, the void dropped; only the sphere is enclosing.
+sealed cavity (a small sphere facing in). The solid must come out closed and manifold, the cavity kept (its
+walls are scanned surface): the sphere's volume less the cavity's; only the sphere and the cavity are enclosing.
     python swift/tests/test_organic_solid.py"""
 import sys
 from pathlib import Path
@@ -28,7 +28,8 @@ scan = np.concatenate([sphere, sheet(5, 4), sheet(-12, 3), void])   # stray shee
 solid = close_mesh(scan, h=0.4)
 assert edge_counts(solid) == (0, 0), edge_counts(solid)
 v = volume(solid)
-assert abs(v - 4 / 3 * np.pi * 1000) < 0.015 * 4 / 3 * np.pi * 1000, v      # the void would take 2.7 %
+want = 4 / 3 * np.pi * (1000 - 27)
+assert abs(v - want) < 0.015 * want, (v, want)          # dropping the cavity would add 2.8 %
 pts, tid = sample(scan, 0.5, return_tri=True)
 on = enclosing(scan, pts, tid)
 on_sphere = (tid < len(sphere)) | (tid >= len(scan) - len(void))
@@ -48,3 +49,12 @@ with tempfile.TemporaryDirectory() as d:
         planes, cylinders, _ = surface_shares(Path(d) / f"{name}.stl")
         assert (planes < 0.4 and cylinders < 0.45) == organic, (name, planes, cylinders)
 print("ok surface_shares")
+
+# the organic validator's samples stand for equal areas, however uneven the triangles (a reduced mesh)
+from validate import sample_area  # noqa: E402
+big = np.array([[[0, 0, 0], [10, 0, 0], [0, 10, 0]]], float)                     # 50 mm2
+tiny = np.array([[[20 + i % 100 * 0.1, i // 100 * 0.1, 0], [20.1 + i % 100 * 0.1, i // 100 * 0.1, 0], [20 + i % 100 * 0.1, 0.1 + i // 100 * 0.1, 0]]
+                 for i in range(10000)], float)                                     # 10,000 x 0.005 = 50 mm2
+_, tid = sample_area(np.concatenate([big, tiny]), 20000)
+assert abs((tid == 0).mean() - 0.5) < 0.02, (tid == 0).mean()
+print("ok sample_area")

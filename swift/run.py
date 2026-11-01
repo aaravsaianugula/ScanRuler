@@ -160,7 +160,7 @@ def main():
             emit("validation", result=wb.last_validation, summary=check)
             failed = wb.last_validation is None or wb.last_validation["verdict"] != "PASS"
             report = ("Organic route: islands removed and holes filled in ScanRuler, closed into a manifold solid (winding number + "
-                      "marching cubes, sealed voids dropped), decimated keeping it closed (MeshLab), written as a faceted STEP solid.")
+                      "marching cubes, sealed crevices kept as cavities), decimated keeping it closed (MeshLab), written as a faceted STEP solid.")
         elif a.no_swift:
             report = "A real scan needs Swift: the exact-reading pass works on CAD-exported meshes only."
             log(f"[run] {report}")

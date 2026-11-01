@@ -65,3 +65,18 @@ with tempfile.TemporaryDirectory() as d:
     finally:
         m.close()
 print("ok")
+
+# a solid with a sealed cavity: one solid, its volume less the cavity's (native OCCT)
+if OCP:
+    inner = (V[np.array(F)] - 5) * 0.4 + 5
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "hollow.step"
+        info = write_step(out, np.concatenate([V[np.array(F)], inner[:, ::-1]]), "hollow")
+        assert info["solids"] == 1 and info["voids"] == 1, info
+        r = STEPControl_Reader()
+        assert r.ReadFile(str(out)) == IFSelect_RetDone
+        r.TransferRoots()
+        props = GProp_GProps()
+        BRepGProp.VolumeProperties_s(r.OneShape(), props)
+        assert BRepCheck_Analyzer(r.OneShape()).IsValid() and abs(props.Mass() - (1000 - 64)) < 0.01, props.Mass()
+        print("hollow ok in native OCCT", props.Mass())
