@@ -2,7 +2,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { ThinkingOrb } from 'thinking-orbs'
 import AsciiHero from './components/AsciiHero.jsx'
 import LiveView from './components/LiveView.jsx'
-import { OrbCard, Reasoning, Timeline, Validation } from './components/SwiftPanels.jsx'
+import { Bodies, OrbCard, Reasoning, Timeline, Validation } from './components/SwiftPanels.jsx'
 import { initial, PHASES, reduce } from './run.js'
 
 // "ANSI Shadow" block letters, joined at run time so every row lines up
@@ -241,6 +241,7 @@ function RunView({ run, elapsed, onStop, onNew, onReport }) {
         <OrbCard run={run} elapsed={elapsed} />
         <Reasoning turns={run.turns} logs={run.logs} running={active && (run.activity === 'thinking' || run.activity === 'writing')} />
         <Validation validations={run.validations} />
+        <Bodies bodies={run.bodies} />
       </div>
       <footer className="runbar">
         {active && <button className="stop" onClick={onStop}>■ STOP</button>}

@@ -265,7 +265,139 @@ class Workbench:
         info = write_step(self.organic_step, read_stl(self.reduced), stem)
         report.append(f"STEP solid: {self.organic_step.name}, {info['faces']} faces, {info['solids']} solids, {info['voids']} cavities"
                       + (f"; {info['faces_left_out']} faces of a cavity no solid holds left out" if info["faces_left_out"] else ""))
+        self.whole, self.pieces = self.reduced, None      # what group_bodies starts from, every time
+        self.rods, self.rings = [], []
+        self._bodies([(stem, read_stl(self.reduced))], [], [])
         return "\n".join(report)
+
+    def _bodies(self, bodies, dropped, cuts):
+        from bodies import _volume
+        self.bodies = [dict(name=n, volume=round(abs(_volume(t)), 1), triangles=len(t), lo=t.reshape(-1, 3).min(0).round(1).tolist(),
+                            hi=t.reshape(-1, 3).max(0).round(1).tolist()) for n, t in bodies]
+        from bodies import draw
+        png = self.work / "bodies.png"
+        t = np.concatenate([b for _, b in bodies])
+        lab = np.repeat(np.arange(len(bodies)), [len(b) for _, b in bodies]) + (1 if len(bodies) > 1 else 0)
+        # each name at the body's own surface point nearest its centre (a ring's centre is in its bore)
+        notes = [(n, b.reshape(-1, 3)[np.linalg.norm(b.reshape(-1, 3) - b.reshape(-1, 3).mean(0), axis=1).argmin()].tolist()) for n, b in bodies]
+        draw(t, lab, notes, png, "bodies as written to the STEP")
+        self.emit("bodies", bodies=self.bodies, dropped=dropped, cuts=cuts, image=str(png))
+
+    def body_pieces(self):
+        """The organic solid's closed pieces, largest first, and pieces.png (each piece coloured, numbered)."""
+        from bodies import describe, survey
+        if not getattr(self, "whole", None):
+            return "no organic solid yet: run the organic route first"
+        self.pieces = survey(read_stl(self.whole), self.grid, self.work / "pieces.png")
+        return describe(self.pieces, self.grid) + f"\n\npicture: {self.work / 'pieces.png'} (view_image) - the listed pieces numbered at their box centres"
+
+    def find_parts(self, near=None, within=40.0):
+        """Parts the solid may hold fused or apart, found by shape (rings.py): rods (staffs, shafts, pins)
+        and flat rings and gears - over the whole solid, or only within within mm of near (a part seen in a
+        picture, looked for where it is). Candidates add up over calls, numbered on; a repeat is not added."""
+        from bodies import _pieces
+        from rings import describe, describe_rods, draw_parts, find, find_rods
+        if not getattr(self, "whole", None):
+            return "no organic solid yet: run the organic route first"
+        v, f, of, *_ = _pieces(read_stl(self.whole))
+        t = v[f]
+        sel = np.ones(len(t), bool) if near is None else np.linalg.norm(t.mean(1) - np.asarray(near, float), axis=1) < float(within)
+        if sel.sum() < 50:
+            return f"nothing of the solid within {within} mm of {near}"
+        rods, rings = find_rods(t[sel], of[sel], solid=t), find(t[sel], of[sel])
+        self.rods, self.rings = getattr(self, "rods", None) or [], getattr(self, "rings", None) or []
+        same_rod = lambda a, b: abs(np.dot(a["axis"], b["axis"])) > 0.995 and abs(a["radius"] - b["radius"]) < 0.2 * b["radius"] and \
+            np.linalg.norm(np.cross(np.subtract(a["centre"], b["centre"]), b["axis"])) < b["radius"]
+        same_ring = lambda a, b: abs(np.dot(a["normal"], b["normal"])) > 0.995 and np.linalg.norm(np.subtract(a["centre"], b["centre"])) < 2
+        new_rods = [r for r in rods if not any(same_rod(r, o) for o in self.rods)]
+        new_rings = [r for r in rings if not any(same_ring(r, o) for o in self.rings)]
+        for r in new_rods:
+            r["id"] = len(self.rods); self.rods.append(r)
+        for r in new_rings:
+            r["id"] = len(self.rings); self.rings.append(r)
+        draw_parts(t, self.rods, self.rings, self.work / "parts.png")
+        where = "" if near is None else f" within {within} mm of {list(near)}"
+        return (f"new{where}:\n" + describe_rods(new_rods) + "\n" + describe(new_rings)
+                + f"\n({len(self.rods)} rods and {len(self.rings)} rings found so far, all drawn)"
+                + f"\n\npicture: {self.work / 'parts.png'} - each candidate in its own colour, labelled")
+
+    def propose_bodies(self):
+        """The finders' bodies, applied (and drawn) for Swift to look at and change, or delivered as they are
+        without Swift: every piece of 1 % of the volume or more that is no sheet a body of its own (the
+        largest "Model"), the rest joining the nearest; cut out of the pieces they are fused into: each ring
+        or gear seen over 60 % of its turn, each straight rod 15 radii long or more (a staff, a shaft; a
+        leg is round too, but not that straight that long) and a stand the solid stands on (at its top face)."""
+        from bodies import _pieces, survey
+        from rings import find_stand
+        whole = read_stl(self.whole)
+        self.pieces = survey(whole, self.grid, self.work / "pieces.png")
+        self.rods, self.rings = [], []
+        self.find_parts()
+        big = [p for p in self.pieces if p["share"] >= 0.01 and p["thickness"] >= 2 * self.grid]
+        groups = [{"name": "Model" if k == 0 else f"Part {k + 1}", "pieces": [p["id"]]} for k, p in enumerate(big)]
+        fused = lambda ids, vol: [i for i in ids if self.pieces[i]["volume"] > 2 * vol]     # a part that is a piece of its own is a body already
+        cuts = []
+        for r in (x for x in self.rings if x["coverage"] >= 0.6):
+            on = fused(r["pieces"], np.pi * (r["tip"] ** 2 - r["bore"] ** 2) * r["thickness"])
+            if on:
+                cuts.append({"name": f"Ring {sum(c['kind'] == 'ring' for c in cuts) + 1}", "kind": "ring", "ring": r["id"], "pieces": on})
+        for r in (x for x in self.rods if x["length"] >= 15 * x["radius"] and x["coverage"] >= 0.8):
+            on = fused(r["pieces"], np.pi * r["radius"] ** 2 * r["length"])
+            if on:
+                name = f"Rod {sum(c['kind'] == 'rod' for c in cuts) + 1}"
+                cuts.append({"name": name, "kind": "rod", "rod": r["id"], "pieces": on})
+                cuts += [{"name": name, "kind": "box", "centre": hd["centre"], "size": hd["size"], "axes": hd["axes"], "pieces": on}
+                         for hd in r.get("heads", []) if hd["clean"]]
+        v, f, of, *_ = _pieces(whole)
+        stand = find_stand(v[f][of == 0]) if big else None
+        if stand:
+            cuts.append({"name": "Stand", "kind": "plane", "point": stand["point"], "normal": stand["normal"], "pieces": [big[0]["id"]]})
+        self.proposal = dict(groups=groups, cuts=cuts, stand=stand)
+        out = self.group_bodies(groups, (), "nearest", cuts)
+        todo = ["rename every body for what it is (Model -> the figure's or part's name, Rod 1 -> staff, shaft, pin ...)"]
+        for r in self.rods:
+            for hd in r.get("heads", []):
+                if not hd["clean"]:
+                    todo.append(f"rod {r['id']} runs into more material at {hd['at']}: if the picture shows its head there (an ornament, a "
+                                f"knob), add {{kind: box, centre: {hd['centre']}, size: {hd['size']}, axes: {hd['axes']}}} under the rod's name, "
+                                "shrunk to the head if it takes more (hair, a hand)")
+        todo.append("look for any part a person would call separate that no finder took, and cut it")
+        out += "\n\nCHECK, then call group_bodies with the call above edited:\n" + "\n".join(f"- {x}" for x in todo)
+        return (f"proposed by the finders ({len(groups)} pieces as bodies, {len(cuts)} cuts"
+                + (f"; stand found: top face at {stand['point']}, {stand['thickness']} mm thick" if stand else "; no stand found")
+                + "):\n" + json.dumps(dict(groups=groups, cuts=cuts)) + "\n" + out)
+
+    def auto_bodies(self):
+        return self.propose_bodies()
+
+    def group_bodies(self, groups, drop=(), rest="touching", splits=()):
+        """Named bodies from the organic solid's pieces (bodies.group): the STEP gets a product per body, and the
+        validator then judges the pieces kept (dropped ones are gone from the solid; splits change no surface)."""
+        from bodies import group, survey
+        from meshio_min import write_stl
+        from step_faceted import write_step
+        if not getattr(self, "whole", None):
+            return "no organic solid yet: run the organic route first"
+        whole = read_stl(self.whole)
+        self.pieces = self.pieces or survey(whole, self.grid)
+        try:
+            bodies, kept, dropped, cuts = group(whole, self.pieces, groups, drop, rest, splits, getattr(self, 'rings', None) or (),
+                                                getattr(self, 'rods', None) or ())
+        except (ValueError, KeyError, TypeError) as e:
+            return f"refused: {e}"
+        self.reduced = self.work / f"{self.stl.stem}_bodies.stl"
+        write_stl(self.reduced, kept)
+        info = write_step(self.organic_step, None, bodies=bodies)
+        self._bodies(bodies, dropped, cuts)
+        return "\n".join([f"STEP {self.organic_step.name}: {info['products']} bodies, {info['solids']} solids, {info['voids']} cavities; "
+                          f"picture: {self.work / 'bodies.png'} (view_image: is each part one body, and nothing of one in another?)"]
+                         + [f"  {b['name']}: {b['volume']} mm3, box {b['lo']}..{b['hi']}" for b in self.bodies]
+                         + [f"  {c['name']}: {c['kind']} cut from pieces {c['pieces']}, {c['volume']} mm3"
+                            + (f" ({c['torn_off_joined']} mm3 torn off the rest joined it)" if c["torn_off_joined"] else "") for c in cuts]
+                         + ["the validator judges the kept pieces uncut: a cut changes no surface, so a FAIL now comes from what was "
+                            "dropped (a dropped sheet of scanned surface leaves that scan uncovered: keep it with rest touching or nearest)"]
+                         + [f"dropped {len(dropped)} pieces, {sum(d['volume'] for d in dropped):.1f} mm3, {sum(d['area'] for d in dropped):.0f} mm2 of surface: "
+                            + ", ".join(f"{d['id']} ({d['volume']} mm3, {d['why']})" for d in dropped[:12]) + (" ..." if len(dropped) > 12 else "")])
 
     def scan_as_posed(self):
         """The scan in the pose the model is built in (after align_*), proven to be the original scan

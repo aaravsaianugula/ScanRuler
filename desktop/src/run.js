@@ -6,8 +6,9 @@ export const PHASES = [
   { id: 'autopilot', n: '03', label: 'Autopilot', kana: '自動' },
   { id: 'swift', n: '04', label: 'Swift', kana: '思考' },
   { id: 'organic', n: '05', label: 'Solid', kana: '造形' },
-  { id: 'check', n: '06', label: 'Validate', kana: '検証' },
-  { id: 'deliver', n: '07', label: 'Deliver', kana: '納品' },
+  { id: 'bodies', n: '06', label: 'Bodies', kana: '部品' },
+  { id: 'check', n: '07', label: 'Validate', kana: '検証' },
+  { id: 'deliver', n: '08', label: 'Deliver', kana: '納品' },
 ]
 
 export const initial = {
@@ -20,6 +21,7 @@ export const initial = {
   timeline: [],            // [{ id, name, args, result, t }]
   validations: [],         // [{ result, summary, t }]
   image: null,             // last picture Swift looked at
+  bodies: null,            // { bodies: [{ name, volume, triangles, lo, hi }], dropped, cuts, image }: the named solids of the STEP
   logs: [],
   done: null, error: null, startedAt: null, endedAt: null,
 }
@@ -34,6 +36,8 @@ export function activityOf(name, args) {
   if (name === 'view_image') return 'looking'
   if (name === 'guide' || name === 'scanruler_help' || name === 'read_file') return 'reading'
   if (name === 'finish') return 'writing'
+  if (name === 'body_pieces' || name === 'find_parts') return 'looking'
+  if (name === 'group_bodies') return 'building'
   if (name === 'run_script') return /slabs|revolve|holes|blends/.test(args || '') ? 'building' : 'measuring'
   if (name === 'scanruler') return BUILD.test(args || '') ? 'building' : MEASURE.test(args || '') ? 'measuring' : 'working'
   return 'working'
@@ -76,6 +80,8 @@ export function reduce(s, e) {
     }
     case 'image':
       return { ...s, image: e.path }
+    case 'bodies':
+      return { ...s, bodies: e, image: e.image || s.image }
     case 'validation':
       return e.result ? { ...s, validations: [...s.validations, { result: e.result, summary: e.summary, t: e.t }] } : s
     case 'log':

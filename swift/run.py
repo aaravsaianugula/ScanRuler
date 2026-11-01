@@ -154,6 +154,12 @@ def main():
             wb.emit, wb.narrate = emit, True
             phase("organic", "Repairing the scan into a solid")
             log(wb.organic())
+            if getattr(wb, "whole", None):          # bodies without Swift: pieces and rings, what shape says for sure
+                phase("bodies", "Finding the bodies")
+                try:
+                    log(wb.auto_bodies())
+                except Exception:       # finding bodies never costs the delivery: the solid stays one body
+                    log("[run] finding the bodies failed, the solid stays one body:\n" + traceback.format_exc())
             phase("check", "Validating the solid against the scan")
             check = wb.check("organic")
             log(check)
@@ -168,14 +174,14 @@ def main():
             if not a.live:          # the headless engine cannot fit scans: reopen as the page
                 wb.close()
                 wb = Workbench(stl, work, page=True, show_browser=not a.headless_browser)
-            wb.narrate = False
+            wb.emit, wb.narrate = emit, False
             phase("swift", "Swift is reverse-engineering the scan")
             agent = Agent(wb, "scan", log=log, max_turns=a.max_turns, emit=emit)
             msg = (f"Scan: {stl.name}, opened in ScanRuler (millimetres).\n{chr(10).join(analysis.splitlines()[1:4])}\n\n"
                    "Start with the guide index, then work the scan-to-cad flow until the validator passes.")
             if mode == "organic":
                 msg = (f"Scan: {stl.name}, opened in ScanRuler (millimetres). {analysis.splitlines()[0]}: classified organic. "
-                       "Look at it, call organic_route, then measure the analytic features it has with their sigma. "
+                       "Look at it, call organic_route, decide by looking which parts are separate bodies (propose_bodies, then group_bodies to fix what the picture shows wrong), then measure the analytic features it has with their sigma. "
                        f"The biggest flat level of its surface (a base, if it stands on one) has normal {flat['normal']} through "
                        f"{flat['point']} ({flat['share']:.0%} of the surface): that normal is the up/down axis, and that is where to start.")
             report, failed = agent.run(msg)
@@ -199,6 +205,8 @@ def main():
               f"**{status}**: {step.name} (mode {mode}, {time.time() - t0:.0f} s)", "",
               "## Validation (independent)", "```", summary(r) if r else "no model was checked", "```", "",
               "## How it was built", report or "(no report)"]
+        if organic and getattr(wb, "bodies", None):
+            md += ["", "## Bodies (a named solid each in the STEP)"] + [f"- {b['name']}: {b['volume']} mm3, box {b['lo']}..{b['hi']}" for b in wb.bodies]
         report_path = work / f"{stl.stem}_REPORT.md"
         report_path.write_text("\n".join(md), encoding="utf-8")
         log(f"[run] {status} -> {work}")

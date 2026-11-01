@@ -97,11 +97,12 @@ function summarize(name, args) {
     if (name === 'view_image' || name === 'read_file') return (a.path || '').split(/[\\/]/).pop()
     if (name === 'scanruler_help') return (a.names || []).join(', ') || 'all tools'
     if (name === 'finish') return a.give_up ? 'give up' : 'deliver'
+    if (name === 'group_bodies') return [...new Set([...(a.groups || []).map((g) => g.name), ...(a.cuts || []).map((c) => c.name)])].join(', ')
     return ''
   } catch { return (args || '').slice(0, 80) }
 }
 
-const ICON = { check: '◆', scanruler: '▶', rebuild: '■', run_script: '▣', guide: '◉', view_image: '◎', finish: '★', read_file: '▤', scanruler_help: '?' }
+const ICON = { check: '◆', scanruler: '▶', rebuild: '■', run_script: '▣', guide: '◉', view_image: '◎', finish: '★', read_file: '▤', scanruler_help: '?', body_pieces: '◫', find_parts: '◎', group_bodies: '▦' }
 
 export function Timeline({ items }) {
   const box = useRef(null)
@@ -184,5 +185,24 @@ function Spark({ values }) {
     <svg className="spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-label="p95 deviation over checks">
       <polyline points={pts} />
     </svg>
+  )
+}
+
+// the named solids the STEP holds (organic route): Swift's grouping of the closed pieces, or the one body
+export function Bodies({ bodies }) {
+  if (!bodies) return null
+  const size = (b) => b.hi.map((h, i) => Math.round(h - b.lo[i])).join(' × ')
+  const lost = bodies.dropped.reduce((a, d) => a + d.volume, 0)
+  return (
+    <section className="panel bodies">
+      <header className="panel-head yellow"><span className="glyph">■</span> BODIES<span className="head-right">{bodies.bodies.length} in STEP{bodies.dropped.length ? ` · ${bodies.dropped.length} dropped` : ''}</span></header>
+      <ul className="body-list">
+        {bodies.bodies.map((b, i) => (
+          <li key={b.name}><i style={{ '--hue': (i * 67) % 360 }} /><b>{b.name}</b><span>{Math.round(b.volume).toLocaleString()} mm³</span><small>{size(b)} mm</small></li>
+        ))}
+      </ul>
+      {bodies.cuts.map((c, i) => <div key={i} className="cluster">{c.kind} cut → <b>{c.name}</b> {Math.round(c.volume).toLocaleString()} mm³</div>)}
+      {bodies.dropped.length > 0 && <div className="cluster dropped">dropped {bodies.dropped.length} pieces · {lost.toFixed(1)} mm³ (junk, reported)</div>}
+    </section>
   )
 }

@@ -53,6 +53,38 @@ SCAN_TOOLS = [
          "(islands off, holes filled, closed), reduce it to max_triangles and write it as a closed STEP solid. The validator then "
          "judges that solid against the scan. Call it once: it takes minutes on a big scan, and what it cannot follow (sealed crevices, "
          "unscanned mouths) does not change with max_triangles.", {"reason": {"type": "string"}, "max_triangles": {"type": "integer"}}, ["reason"]),
+    tool("body_pieces", "After organic_route: look at the solid - three views with a mm grid, its closed pieces coloured and numbered - "
+         "and the pieces listed largest first (volume, box, cavities, nearest piece and gap, touching). Decide from the picture which "
+         "parts a person would call separate bodies, and where they are."),
+    tool("group_bodies", "After organic_route: name the bodies and write each as a named solid in the STEP, then the validator judges what is kept. "
+         "groups: [{name, pieces: [ids]}] (one body each: a sliver hugging the figure goes in the figure's group); drop: junk ids (specks, "
+         "stray layers; reported); rest: what unlisted pieces do - 'touching' (join the group of a grouped piece they touch, else dropped), "
+         "'nearest', 'drop'. cuts: where the scan fused separate parts (a figure on its base, a gear touching a leg, a bolt in its hole), "
+         "[{name, kind, ...}] carves the body name out of the kept pieces the knife reaches, by exact booleans - every scanned detail "
+         "stays in one body or the other: plane {point, normal} (the normal's side), box {centre, size, axes?}, cylinder {centre, axis, "
+         "radius, height, inner?} (a rod, a tube), ring {ring, grow?} (a ring/gear from find_parts, grown grow mm, default 1), rod {rod, "
+         "grow?, extend?: [mm, mm]} (a rod from find_parts, its ends moved out along its axis over what hid it). Cuts sharing a name make "
+         "one body (a staff's rod and a box round its head). "
+         "Call again to regroup: it starts from the whole solid.",
+         {"groups": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "pieces": {"type": "array", "items": {"type": "integer"}}}, "required": ["name", "pieces"]}},
+          "drop": {"type": "array", "items": {"type": "integer"}}, "rest": {"type": "string", "enum": ["touching", "nearest", "drop"]},
+          "cuts": {"type": "array", "items": {"type": "object", "properties": {
+              "name": {"type": "string"}, "kind": {"type": "string", "enum": ["plane", "box", "cylinder", "ring", "rod"]},
+              "point": {"type": "array", "items": {"type": "number"}}, "normal": {"type": "array", "items": {"type": "number"}},
+              "centre": {"type": "array", "items": {"type": "number"}}, "size": {"type": "array", "items": {"type": "number"}},
+              "axes": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+              "axis": {"type": "array", "items": {"type": "number"}}, "radius": {"type": "number"}, "height": {"type": "number"},
+              "inner": {"type": "number"}, "ring": {"type": "integer"}, "rod": {"type": "integer"}, "grow": {"type": "number"},
+              "extend": {"type": "array", "items": {"type": "number"}},
+              "pieces": {"type": "array", "items": {"type": "integer"}}}, "required": ["name", "kind"]}}}, ["groups"]),
+    tool("propose_bodies", "After organic_route: the finders' bodies, applied and drawn - separate pieces, rings/gears and long "
+         "straight rods cut out where fused, a stand cut at its top face - with the group_bodies call they made. Look at the "
+         "picture: keep it, or change it with group_bodies (edit that call: rename, regroup, cut what they missed, undo a wrong cut)."),
+    tool("find_parts", "After organic_route: parts found by their shape, fused to others or not - rods (staffs, shafts, pins: radius, "
+         "ends, axis) and flat rings and gears (centre, axis, thickness, bore, tip, teeth) - with how much of each was seen and its pieces. "
+         "Candidates, not verdicts: a leg or an arm can read as a rod. near + within (mm): look only there - for a part you saw in "
+         "a picture, its position read off the mm grid (much faster, and finds what the whole-solid search missed). A few minutes on "
+         "the whole of a big solid.", {"near": {"type": "array", "items": {"type": "number"}}, "within": {"type": "number"}}),
 ]
 CAD_TOOLS = [
     tool("run_script", "Run a reverse-engineering script (analyze, frame, slabs, revolve, holes, blends, compare, helix, profile, rz, centers, two_way, slice, vslice) with CLI args.",
@@ -163,7 +195,7 @@ class Agent:
         p = (self.wb.work / path).resolve()
         if not p.exists() or self.wb.work not in p.parents and p.parent != self.wb.work:
             return f"no image at {path}", None
-        return f"{path} attached", base64.b64encode(p.read_bytes()).decode()
+        return f"{path} attached", base64.b64encode(p.read_bytes()).decode(), str(p)
 
     def t_read_file(self, path, max_chars=6000):
         p = (self.wb.work / path).resolve()
@@ -225,6 +257,31 @@ class Agent:
         self.mode = "organic"            # the gate is now the organic solid against the scan
         self.changes += 1
         return out + "\n\n" + self.t_check()
+
+    def _with(self, out, png):
+        """A tool answer with its picture: Swift decides bodies by looking, not from numbers alone."""
+        p = self.wb.work / png
+        return (out, base64.b64encode(p.read_bytes()).decode(), str(p)) if p.exists() and not out.startswith(("no ", "refused")) else out
+
+    def t_body_pieces(self):
+        return self._with(self.wb.body_pieces(), "pieces.png")
+
+    def t_propose_bodies(self):
+        out = self.wb.propose_bodies()
+        if out.startswith(("refused", "no organic")):
+            return out
+        self.changes += 1
+        return self._with(out + "\n\n" + self.t_check(), "bodies.png")
+
+    def t_find_parts(self, near=None, within=40.0):
+        return self._with(self.wb.find_parts(near, within), "parts.png")
+
+    def t_group_bodies(self, groups, drop=(), rest="touching", cuts=()):
+        out = self.wb.group_bodies(groups, drop, rest, cuts)
+        if out.startswith(("refused", "no organic")):
+            return out
+        self.changes += 1
+        return self._with(out + "\n\n" + self.t_check(), "bodies.png")
 
     def t_rebuild(self, files):
         self.changes += 1
@@ -316,17 +373,17 @@ class Agent:
                             out = f"{name} failed: {type(e).__name__}: {e}"
                     if name == "finish" and out is None:
                         return args.get("report", ""), args.get("give_up", False) or not self.passed
-                    if name == "view_image" and isinstance(out, tuple):
-                        out, img = out
+                    if isinstance(out, tuple):          # a picture with it (view_image, pieces, parts, bodies)
+                        out, img, *where = out
                         if img:
                             images.append(img)
-                            self.emit("image", path=str((self.wb.work / args.get("path", "")).resolve()))
+                            self.emit("image", path=where[0] if where else str((self.wb.work / args.get("path", "")).resolve()))
                 if name == "guide":
                     self.pinned.add(len(msgs))
                 self.log(f"   <- {name}: {str(out)[:600]}")
                 self.emit("tool_result", name=name, text=str(out)[:1500])
                 msgs.append({"role": "tool", "tool_call_id": c.get("id", name), "content": str(out)})
             for img in images:      # vision goes in a user turn: tool messages carry text only
-                msgs.append({"role": "user", "content": [{"type": "text", "text": "The image you asked for:"},
+                msgs.append({"role": "user", "content": [{"type": "text", "text": "The picture with that answer - look at it before deciding:"},
                                                          {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img}"}}]})
         return f"turn budget ({self.max_turns}) spent", True

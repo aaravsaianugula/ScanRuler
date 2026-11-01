@@ -209,7 +209,7 @@ button:focus-visible, [role=button]:focus-visible, input:focus-visible, label:fo
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .chip { font: 700 10px/1 var(--mono); padding: 4px 6px; border: 1.5px solid var(--line); letter-spacing: 0.06em; }
 .chip.yellow { border-color: var(--yellow); color: var(--yellow); }
-.rail { list-style: none; display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin: 4px 14px 8px; padding: 0; }
+.rail { list-style: none; display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; margin: 4px 14px 8px; padding: 0; }
 .rail li { border: 1.5px solid var(--line); padding: 4px 5px; display: grid; line-height: 1.15; color: var(--muted); transition: background 0.3s, color 0.3s; }
 .rail b { font: 800 14px/1 var(--display); }
 .rail span { font: 700 9px/1.2 var(--display); letter-spacing: 0.1em; text-transform: uppercase; }
@@ -245,6 +245,14 @@ button:focus-visible, [role=button]:focus-visible, input:focus-visible, label:fo
 .cluster { font-size: 11px; padding: 4px 0 4px 8px; border-left: 3px solid var(--red); margin-top: 4px; color: #d8d2c6; }
 .cluster b { color: var(--paper); text-transform: uppercase; }
 .cluster-shape { color: var(--yellow); }
+.bodies { flex: none; max-height: 220px; overflow: auto; }
+.body-list { list-style: none; margin: 0; padding: 6px 10px; display: grid; gap: 4px; font-size: 12px; }
+.body-list li { display: grid; grid-template-columns: 10px 1fr auto auto; gap: 8px; align-items: baseline; }
+.body-list i { width: 10px; height: 10px; background: hsl(var(--hue) 70% 55%); align-self: center; }
+.body-list b { color: var(--paper); text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.body-list small { color: #9a948a; }
+.bodies .cluster { margin: 0 10px 6px; }
+.cluster.dropped { border-left-color: #9a948a; }
 
 .runbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; border-top: 2px solid #000; padding: 0 2px; min-width: 0; }
 .runbar button:not(.go) { background: var(--panel); border: 2px solid #000; box-shadow: 3px 3px 0 #000; padding: 5px 12px; font: 800 11px/1 var(--display); letter-spacing: 0.14em; }
