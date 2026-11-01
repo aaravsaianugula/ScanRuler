@@ -58,7 +58,7 @@ def survey(tris, grid, png=None):
         near = int(owner[others][j[d.argmin()]]) if j is not None else None
         touch = {int(owner[k]) for ks in tree.query_ball_point(p, 2 * grid) for k in ks} - {i}
         out.append(dict(id=i, volume=round(float(cvol[c] / 6), 1), share=round(float(cvol[c] / total), 5), area=round(area, 1),
-                        thickness=round(float(2 * cvol[c] / 6 / area), 2),
+                        thickness=round(float(2 * cvol[c] / 6 / area), 2), sheet=bool(2 * cvol[c] / 6 / area < 2 * grid),
                         lo=lo.round(1).tolist(), hi=hi.round(1).tolist(), centre=((lo + hi) / 2).round(1).tolist(),
                         cavities=len(voids[c]), nearest=near, gap=round(float(d.min()), 2) if near is not None else None,
                         touching=sorted(touch)))
@@ -93,7 +93,7 @@ def group(tris, pieces, groups, drop=(), rest="touching", splits=(), rings=(), r
     pieces it reaches (or of pieces) becomes the body name, the rest stays where it was; in order, so a later
     cut takes from what earlier ones left. Bits a cut tears off the rest that are under 5 % of what it took go
     with the body. Every cut is checked to keep the volume, and the bodies to add up to the kept solid.
-    Returns the bodies [(name, triangles)] for the STEP writer, the kept triangles (uncut: what the validator
+    Returns the bodies [(name, (vertices, faces))] for the STEP writer, the kept triangles (uncut: what the validator
     judges), the dropped pieces and the cuts made. Refuses ids out of range, a piece in two places, an
     unnamed or empty group, a cut that reaches nothing."""
     n = len(pieces)
@@ -131,8 +131,14 @@ def group(tris, pieces, groups, drop=(), rest="touching", splits=(), rings=(), r
     if len(set(names)) != len(names) or cut_names & set(names):
         raise ValueError("two bodies with one name (cuts may share one: they make one body, a rod and its head)")
     v, f, of, *_ = _pieces(tris)
-    part = {i: _manifold(v[f[of == i]]) for i in where}
-    total = sum(m.volume() for m in part.values())
+    # a body is a list of parts: a piece as scanned (its own triangles, no boolean touched it) or what a cut
+    # left of one (manifold3d). Booleans only where a knife goes through a solid piece: a sheet of scanned
+    # surface (a sliver a fraction of a cell thick) is never cut - it goes whole with the knife holding its
+    # centre - since booleans on next to no volume make junk shells
+    orig = {i: v[f[of == i]] for i in where}
+    part = {i: orig[i] for i in where}           # triangles, or a manifold once cut
+    vol = lambda x: x.volume() if not isinstance(x, np.ndarray) else _volume(x)
+    total = sum(vol(x) for x in part.values())
     made, extra = [], []
     for k, c in enumerate(splits):
         nm = str(c.get("name", "")).strip().replace("'", "")
@@ -144,65 +150,91 @@ def group(tris, pieces, groups, drop=(), rest="touching", splits=(), rings=(), r
             targets = [c["piece"]]
         if targets is None:     # every kept piece the knife reaches
             kb = K.bounding_box()
-            targets = [i for i, m in part.items() if _overlap(m.bounding_box(), kb)]
-        body, torn, took = None, 0.0, []
+            targets = [i for i, x in part.items() if x is not None and _overlap(_box(x), kb)]
+        took_parts, torn, took = [], 0.0, []
         for i in targets:
             if bad(i) or i not in part:
                 raise ValueError(f"cut {k}: piece {i} is not kept")
-            inside, outside = part[i] ^ K, part[i] - K
+            if part[i] is None:
+                continue
+            if pieces[i].get("sheet") and isinstance(part[i], np.ndarray):
+                if _holds(K, part[i].reshape(-1, 3).mean(0)):
+                    took_parts.append(part[i]); part[i] = None; took.append(i)
+                continue
+            m = part[i] if not isinstance(part[i], np.ndarray) else _manifold(part[i])
+            inside, outside = m ^ K, m - K
             if inside.is_empty():
                 continue
-            if abs(inside.volume() + outside.volume() - part[i].volume()) > 1e-6 * part[i].volume() + 1e-3:
+            if abs(inside.volume() + outside.volume() - m.volume()) > 1e-6 * abs(m.volume()) + 1e-3:
                 raise ValueError(f"cut {k}: cutting piece {i} lost volume")
             # what the knife tore off the rest (a tooth tip past the knife's edge: small, and touching what it took)
             # goes with the body; a bit of the rest that only came apart elsewhere stays with the rest. The rest
             # stays as the boolean left it (its cavities with it), less what moved
-            comps = sorted((m for m in outside.decompose() if m.volume() > 0), key=lambda m: -m.volume()) if not outside.is_empty() else []
+            comps = sorted((x for x in outside.decompose() if x.volume() > 0), key=lambda x: -x.volume()) if not outside.is_empty() else []
             big = comps[0].volume() if comps else 0.0
-            moved = [m for m in comps if (m.volume() < big or big <= 0.05 * inside.volume()) and m.volume() < 0.05 * inside.volume()
-                     and inside.min_gap(m, 0.05) < 0.01]
-            if moved:
-                torn += sum(m.volume() for m in moved)
-                inside, outside = inside + _sum(moved), outside - _sum(moved)
-            body = inside if body is None else body + inside
+            moved = [x for x in comps if (x.volume() < big or big <= 0.05 * inside.volume()) and x.volume() < 0.05 * inside.volume()
+                     and inside.min_gap(x, 0.05) < 0.01]
+            for x in moved:         # parts of their own, touching what it took: a union with a sliver of noise makes junk
+                torn += x.volume()
+                outside = outside - x
+            took_parts += [inside, *moved]
             part[i] = None if outside.is_empty() else outside
             took.append(i)
-        if body is None:
+        if not took_parts:
             raise ValueError(f"cut {k} ({nm}): the knife reaches no kept solid")
         hit = [x for x in extra if x[0] == nm]
         if hit:
-            extra[extra.index(hit[0])] = (nm, hit[0][1] + body)
+            hit[0][1].extend(took_parts)
         else:
-            extra.append((nm, body))
-        made.append(dict(name=nm, kind=c.get("kind", "plane"), pieces=took, volume=round(body.volume(), 1), torn_off_joined=round(torn, 2)))
+            extra.append((nm, took_parts))
+        made.append(dict(name=nm, kind=c.get("kind", "plane"), pieces=took, volume=round(sum(vol(x) for x in took_parts), 1),
+                         torn_off_joined=round(torn, 2)))
     # a piece no group named (a sliver hugging the solid) goes with the body nearest it once the cuts are made:
     # the sliver under a stand with the stand, not with the figure its piece was
     named = {i for g in groups for i in g["pieces"]}
     loose = [i for i in where if i not in named and part.get(i) is not None]
-    fixed = [(nm, _sum([part[i] for i in where if where[i] == gi and i not in loose])) for gi, nm in enumerate(names)] + extra
-    fixed = [(nm, m) for nm, m in fixed if m is not None and not m.is_empty()]
-    joins = {}
-    for i in loose:
-        gaps = [m.min_gap(part[i], 5.0) for _, m in fixed]
-        joins.setdefault(int(np.argmin(gaps)) if gaps and min(gaps) < 5.0 else None, []).append(i)
-    bodies = [(nm, _sum([m] + [part[i] for i in joins.get(k, [])])) for k, (nm, m) in enumerate(fixed)]
-    if joins.get(None):     # nothing within 5 mm: as rest said (the group it joined)
-        for gi, nm in enumerate(names):
-            extra_pieces = [part[i] for i in joins[None] if where[i] == gi]
-            if extra_pieces:
-                hit = [k for k, (n, _) in enumerate(bodies) if n == nm]
-                if hit:
-                    bodies[hit[0]] = (nm, _sum([bodies[hit[0]][1]] + extra_pieces))
-                else:
-                    bodies.append((nm, _sum(extra_pieces)))
-    bodies = [(nm, m) for nm, m in bodies if m is not None and not m.is_empty()]
+    bodies = [(nm, [part[i] for i in where if where[i] == gi and i not in loose and part[i] is not None]) for gi, nm in enumerate(names)] + extra
+    bodies = [(nm, ps_) for nm, ps_ in bodies if ps_]
+    if loose:
+        from scipy.spatial import cKDTree
+        trees = [cKDTree(np.concatenate([_pts(x) for x in ps_])) for _, ps_ in bodies]
+        for i in loose:
+            q = _pts(part[i])
+            gaps = [float(tr.query(q)[0].min()) for tr in trees]
+            k = int(np.argmin(gaps)) if gaps and min(gaps) < 5.0 else None
+            if k is None:       # nothing within 5 mm: as rest said (the group it joined)
+                nm = names[where[i]]
+                hit = [j for j, (n_, _) in enumerate(bodies) if n_ == nm]
+                k = hit[0] if hit else len(bodies)
+                if not hit:
+                    bodies.append((nm, []))
+            bodies[k][1].append(part[i])
     # every bit of the kept solid in exactly one body: the bodies together are what the validator judges
-    if abs(sum(m.volume() for _, m in bodies) - total) > 1e-6 * total + 1e-2:
-        raise ValueError(f"the bodies do not add up to the solid: {sum(m.volume() for _, m in bodies):.3f} mm3 of {total:.3f} "
-                         f"({', '.join(f'{n} {m.volume():.1f}' for n, m in bodies)})")
+    got = sum(vol(x) for _, ps_ in bodies for x in ps_)
+    if abs(got - total) > 1e-6 * abs(total) + 1e-2:
+        raise ValueError(f"the bodies do not add up to the solid: {got:.3f} mm3 of {total:.3f} "
+                         f"({', '.join(f'{n} {sum(vol(x) for x in ps_):.1f}' for n, ps_ in bodies)})")
     kept = v[f[np.isin(of, list(where))]]
-    out = [(nm, _tris(m)) for nm, m in bodies]
+    out = [(nm, _mesh(ps_)) for nm, ps_ in bodies]
     return out, kept, [dict(id=i, volume=pieces[i]["volume"], area=pieces[i]["area"], why=w) for i, w in sorted(dropped.items())], made
+
+
+def _box(x):
+    if isinstance(x, np.ndarray):
+        p = x.reshape(-1, 3)
+        return (*p.min(0), *p.max(0))
+    return x.bounding_box()
+
+
+def _pts(x):
+    return x.reshape(-1, 3) if isinstance(x, np.ndarray) else np.asarray(x.to_mesh64().vert_properties)[:, :3]
+
+
+def _holds(K, p):
+    import igl
+    t = _tris(K)
+    V, F = indexed(t)
+    return bool(igl.fast_winding_number(V, F.astype(np.int64), np.asarray([p], float))[0] > 0.5)
 
 
 def _volume(t):
@@ -216,6 +248,18 @@ def _manifold(t):
     if m.status() != m3d.Error.NoError:
         raise ValueError(f"a piece is not a manifold solid to cut: {m.status()}")
     return m
+
+
+def _mesh(parts):
+    """A body's parts as one (vertices, faces): a piece as scanned welded as the scan was, a cut one shell by
+    shell (to a micron: a sliver of a triangle collapses away), no vertex shared between parts or
+    shells - two solids touching at an edge would share it four ways (non-manifold)."""
+    vs, fs, base = [], [], 0
+    for x in parts:
+        for t, dec in ([(x, 6)] if isinstance(x, np.ndarray) else [(_tris(c), 6) for c in x.decompose()]):
+            v, f = indexed(t, dec)
+            vs.append(v); fs.append(f + base); base += len(v)
+    return np.concatenate(vs), np.concatenate(fs).astype(np.int64)
 
 
 def _tris(m):

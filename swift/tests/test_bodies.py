@@ -50,7 +50,7 @@ assert len(gp) == 1, gp
 found = find(fused, np.zeros(len(fused), int))
 assert len(found) == 1 and abs(found[0]["bore"] - 22) < 0.3 and abs(found[0]["thickness"] - 4) < 0.1 and found[0]["teeth"] == teeth, found
 gb, *_ = group(fused, gp, [{"name": "Post", "pieces": [0]}], splits=[{"name": "Wheel", "kind": "ring", "ring": 0}], rings=found)
-vol = {n: abs(sum(np.einsum("ij,ij->i", t[:, 0], np.cross(t[:, 1], t[:, 2]))) / 6) for n, t in gb}
+vol = {n: abs(sum(np.einsum("ij,ij->i", t[:, 0], np.cross(t[:, 1], t[:, 2]))) / 6) for n, t in ((n, v[f]) for n, (v, f) in gb)}
 assert abs(vol["Post"] + vol["Wheel"] - solid.volume()) < 1e-3 * solid.volume() and vol["Wheel"] >= wheel.volume() - 1, (vol, wheel.volume())
 print("gear wheel ok", {k: round(x, 1) for k, x in vol.items()})
 

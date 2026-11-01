@@ -60,9 +60,9 @@ def solid_pieces(v, f):
 
 
 def write_step(path, tris, name="Body", bodies=None):
-    """bodies: [(name, triangles)], each written as a product of its own so named (a solid per closed piece,
-    its cavities as voids); default the one body (name, tris). Bodies are indexed apart: two that touch
-    (halves of a cut) share no vertex or edge."""
+    """bodies: [(name, triangles or (vertices, faces))], each written as a product of its own so named (a
+    solid per closed piece, its cavities as voids); default the one body (name, tris). Bodies are indexed
+    apart: two that touch (halves of a cut) share no vertex or edge; an indexed body keeps its indexing."""
     bodies = bodies or [(name, tris)]
     lines, n = [], [0]
 
@@ -89,7 +89,7 @@ def write_step(path, tris, name="Body", bodies=None):
     info = dict(vertices=0, faces=0, solids=0, voids=0, faces_left_out=0, products=len(bodies))
     for bname, btris in bodies:
         bname = str(bname).replace("'", "")
-        v, f = indexed(np.asarray(btris, float))
+        v, f = (np.asarray(btris[0], float), np.asarray(btris[1], np.int64)) if isinstance(btris, tuple) else indexed(np.asarray(btris, float))
         f, comp, cvol, solids, voids, lost = solid_pieces(v, f)
         # real topology, not POLY_LOOPs: a face per triangle, but one edge per mesh edge shared by its two
         # faces, so a reader gets one connected closed shell (OCCT splits a POLY_LOOP shell into many solids)

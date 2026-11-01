@@ -272,6 +272,7 @@ class Workbench:
 
     def _bodies(self, bodies, dropped, cuts):
         from bodies import _volume
+        bodies = [(n, b[0][b[1]] if isinstance(b, tuple) else b) for n, b in bodies]
         self.bodies = [dict(name=n, volume=round(abs(_volume(t)), 1), triangles=len(t), lo=t.reshape(-1, 3).min(0).round(1).tolist(),
                             hi=t.reshape(-1, 3).max(0).round(1).tolist()) for n, t in bodies]
         from bodies import draw
