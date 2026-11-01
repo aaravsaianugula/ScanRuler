@@ -263,7 +263,8 @@ class Workbench:
         write_stl(self.reduced, reduce_mesh(solid, max_triangles))
         report.append(f"reduced to {max_triangles} triangles (MeshLab quadric, topology kept): {self.reduced.name}")
         info = write_step(self.organic_step, read_stl(self.reduced), stem)
-        report.append(f"STEP solid: {self.organic_step.name}, {info['faces']} faces")
+        report.append(f"STEP solid: {self.organic_step.name}, {info['faces']} faces, {info['solids']} solids, {info['voids']} cavities"
+                      + (f"; {info['faces_left_out']} faces of a cavity no solid holds left out" if info["faces_left_out"] else ""))
         return "\n".join(report)
 
     def scan_as_posed(self):

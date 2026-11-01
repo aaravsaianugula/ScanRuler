@@ -96,7 +96,7 @@ def write_step(path, tris, name="Body"):
         faces.append(ent(f"ADVANCED_FACE('',(#{bound}),#{pl},.T.)"))
     shell = {c: ent("CLOSED_SHELL('',(" + ",".join(f"#{faces[i]}" for i in np.flatnonzero(comp == c)) + "))") for c in np.unique(comp)}
     solids = [c for c in shell if cvol[c] > 0]
-    voids = {c: [] for c in solids}
+    voids, lost = {c: [] for c in solids}, 0
     for c in shell:
         if cvol[c] < 0:     # in the smallest solid around it (winding number at one of its corners)
             import igl
@@ -104,6 +104,8 @@ def write_step(path, tris, name="Body"):
             around = [s for s in solids if igl.fast_winding_number(v, f[comp == s].astype(np.int64), p)[0] > 0.5]
             if around:
                 voids[min(around, key=lambda s: cvol[s])].append(ent(f"ORIENTED_CLOSED_SHELL('',*,#{shell[c]},.F.)"))
+            else:       # a cavity no solid holds (it crosses one's wall): left out, and said
+                lost += int((comp == c).sum())
     breps = []
     for k, c in enumerate(solids):
         label = f"{name}{'' if k == 0 else f' {k + 1}'}"
@@ -115,7 +117,7 @@ def write_step(path, tris, name="Body"):
             f"FILE_NAME('{Path(path).name}','{now}',(''),(''),'scanruler-swift','scanruler-swift','');",
             "FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));", "ENDSEC;", "DATA;"]
     Path(path).write_text("\n".join(head + lines + ["ENDSEC;", "END-ISO-10303-21;", ""]), encoding="ascii")
-    return dict(vertices=len(v), faces=len(f), solids=len(breps), voids=sum(map(len, voids.values())))
+    return dict(vertices=len(v), faces=len(f), solids=len(breps), voids=sum(map(len, voids.values())), faces_left_out=lost)
 
 
 def main():
