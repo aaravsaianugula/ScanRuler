@@ -199,8 +199,8 @@ class Workbench:
     def organic(self, max_triangles=150000, grid=None):
         """The organic route (a figurine, a sculpture - no analytic faces to rebuild): repair the scan
         in ScanRuler's mesh tools (islands off, holes filled: small ones curved, the rest flat), close what
-        the filler could not (organic_solid: winding number + marching cubes on a grid mm - about 1/1100 of
-        the part by default - pieces turned to face out, sealed crevices kept as cavities, sub-grid specks dropped; a scan that
+        the filler could not (organic_solid: winding number + marching cubes on a grid mm - by default half
+        the scan's own spacing, within 1/1650..1/1100 of the part - pieces turned to face out, sealed crevices kept as cavities, sub-grid specks dropped; a scan that
         encloses no volume is thickened in ScanRuler first), reduce it to max_triangles keeping it closed, and
         write it as a closed STEP solid. The
         validator holds it to the scan's noise, whatever the caller asks for. Needs the page."""
@@ -213,33 +213,7 @@ class Workbench:
         closed = self.work / f"{stem}_closed.stl"
         diag = float(np.linalg.norm(np.ptp(read_stl(self.input).reshape(-1, 3), axis=0)))
         report = []
-
-        def run(c):
-            txt, err = self.batch([c])      # one at a time: each is a long job on a big scan, and each answer is worth reading
-            try:
-                res = json.loads(txt)["results"][0]
-                # an answer's status line says what it did; a failure is kept whole, it is what the reader needs
-                body = (res.get("result") or {}).get("status") or "" if res.get("ok") else json.dumps(res.get("error"))
-            except Exception:
-                res, body = {"ok": False}, txt
-            # "No hole/piece ... smaller than that": nothing to do, not a failure
-            ok = res.get("ok") or str((res.get("error") or {}).get("message", "")).startswith(("No hole", "No piece"))
-            report.append(f"{c['tool']}: {'ok' if ok else 'FAILED'} {body[:600] if res.get('ok') or not ok else res['error']['message']}")
-            return res.get("result") or {} if ok else None
-
-        # a second run starts from the scan again (fails harmlessly on a first); the panel keeps its sizes, so
-        # the curved fill is given the size it had the first time
-        self.batch([{"tool": "mesh_discard_edited", "arguments": {}}])
-        curved = {"patch": "curved", **({"size": self.hole_size} if getattr(self, "hole_size", None) else {})}
-        for c in [{"tool": "mesh_remove_islands", "arguments": {}},
-                  {"tool": "mesh_fill_holes", "arguments": curved},
-                  {"tool": "mesh_fill_holes", "arguments": {"patch": "flat", "size": round(diag, 1)}},
-                  {"tool": "mesh_export", "arguments": {"part": "edited", "path": str(self.repaired)}}]:
-            res = run(c)
-            if res is None:
-                return "\n".join(report)
-            if c["arguments"] is curved:
-                self.hole_size = getattr(self, "hole_size", None) or (res.get("edit") or {}).get("maxSize")
+        self._repair(diag, report)
         # every piece facing out, in the delivered repaired scan too: the validator reads it as written
         scan = np.concatenate(orient(pieces(read_stl(self.repaired))))
         write_stl(self.repaired, scan)
@@ -248,20 +222,26 @@ class Workbench:
         if not len(solid):
             # the scan encloses no volume - one side of a part, a relief, a face: ScanRuler gives it thickness
             report.append("the repaired scan encloses no volume (a single open sheet): thickening it")
-            if run({"tool": "mesh_shell", "arguments": {"mode": "thicken", "side": "in"}}) is None or \
-                    run({"tool": "mesh_export", "arguments": {"part": "edited", "path": str(self.repaired)}}) is None:
+            if self._mesh_step({"tool": "mesh_shell", "arguments": {"mode": "thicken", "side": "in"}}, report) is None or \
+                    self._mesh_step({"tool": "mesh_export", "arguments": {"part": "edited", "path": str(self.repaired)}}, report) is None:
+                report.append("FAILED: the scan is a single open sheet that encloses no volume, and ScanRuler's thickening did not "
+                              "go through (above). Next: organic_route again (a page hiccup clears), or thicken it with scanruler "
+                              "mesh_shell {mode: thicken} and then organic_route")
                 return "\n".join(report)
             scan = np.concatenate(orient(pieces(read_stl(self.repaired))))
             write_stl(self.repaired, scan)
             solid = close_mesh(scan, grid)
             if not len(solid):
-                report.append("FAILED: still no volume after thickening")
+                report.append("FAILED: still no volume after thickening: the thickened scan has no inside a winding number finds "
+                              "(sheets crossing each other everywhere?). Next: look at it (body_pieces), remove the stray sheets with "
+                              "scanruler mesh_* tools, then organic_route")
                 return "\n".join(report)
         write_stl(closed, solid)
         self.closed, self.grid = closed, grid      # the validator tells bridged gaps from them
         report.append(f"closed on a {grid:.3g} mm grid: {len(solid)} triangles, {closed.name}")
-        write_stl(self.reduced, reduce_mesh(solid, max_triangles))
-        report.append(f"reduced to {max_triangles} triangles (MeshLab quadric, topology kept): {self.reduced.name}")
+        reduced = reduce_mesh(solid, max_triangles)
+        write_stl(self.reduced, reduced)
+        report.append(f"reduced to {len(reduced)} triangles (MeshLab quadric, topology kept, thin walls kept from cutting through each other): {self.reduced.name}")
         info = write_step(self.organic_step, read_stl(self.reduced), stem)
         report.append(f"STEP solid: {self.organic_step.name}, {info['faces']} faces, {info['solids']} solids, {info['voids']} cavities"
                       + (f"; {info['faces_left_out']} faces of a cavity no solid holds left out" if info["faces_left_out"] else ""))
@@ -269,6 +249,46 @@ class Workbench:
         self.rods, self.rings = [], []
         self._bodies([(stem, read_stl(self.reduced))], [], [])
         return "\n".join(report)
+
+    def _mesh_step(self, c, report, tries=2):
+        """One ScanRuler mesh call, at its best: the answer, {} for "nothing to do", None when it did not go
+        through - reported either way. A bridge or page hiccup (no answer to read) is tried once more."""
+        for _ in range(tries):
+            try:
+                txt, err = self.batch([c])      # one at a time: each is a long job on a big scan, and each answer is worth reading
+                res = json.loads(txt)["results"][0]
+                break
+            except Exception as e:
+                res = {"ok": False, "error": {"message": f"no answer from ScanRuler ({type(e).__name__}: {str(e)[:300]})"}}
+        msg = str((res.get("error") or {}).get("message", ""))
+        # "No hole/piece ... smaller than that": nothing to do, not a failure
+        ok = res.get("ok") or msg.startswith(("No hole", "No piece"))
+        # an answer's status line says what it did; a failure is kept whole, it is what the reader needs
+        body = (res.get("result") or {}).get("status") or "" if res.get("ok") else msg
+        report.append(f"{c['tool']}: {'ok' if ok else 'did not go through:'} {body[:600]}")
+        return res.get("result") or {} if ok else None
+
+    def _repair(self, diag, report):
+        """ScanRuler's repair, every step best-effort: one that refuses, finds nothing or errors is reported
+        and the next runs. self.repaired is then the edited copy as exported, or, with no edited copy (nothing
+        needed repair) or no export, the scan as it is: close_mesh closes what the filler left open."""
+        try:      # a second run starts from the scan again (fails harmlessly on a first)
+            self.batch([{"tool": "mesh_discard_edited", "arguments": {}}])
+        except Exception:
+            pass
+        # the panel keeps its sizes, so the curved fill is given the size it had the first time
+        curved = {"patch": "curved", **({"size": self.hole_size} if getattr(self, "hole_size", None) else {})}
+        for c in [{"tool": "mesh_remove_islands", "arguments": {}},
+                  {"tool": "mesh_fill_holes", "arguments": curved},
+                  {"tool": "mesh_fill_holes", "arguments": {"patch": "flat", "size": round(diag, 1)}}]:
+            res = self._mesh_step(c, report)
+            if res is not None and c["arguments"] is curved:
+                self.hole_size = getattr(self, "hole_size", None) or (res.get("edit") or {}).get("maxSize")
+        Path(self.repaired).unlink(missing_ok=True)      # never a copy left from an earlier run
+        export = {"tool": "mesh_export", "arguments": {"part": "edited", "path": str(self.repaired)}}
+        if self._mesh_step(export, report) is None or not Path(self.repaired).exists():
+            shutil.copyfile(self.input, self.repaired)
+            report.append(f"carried on from the scan as it is (no edited copy to export): {Path(self.repaired).name}")
 
     def _bodies(self, bodies, dropped, cuts):
         from bodies import _volume
