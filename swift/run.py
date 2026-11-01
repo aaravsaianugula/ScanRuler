@@ -69,6 +69,27 @@ def surface_shares(stl, samples=40000, candidates=1500, deg=8):
     return float(planes), float((np.abs(c @ s.T) < np.sin(np.radians(deg))).mean(1).max()), flat
 
 
+ORGANIC_REPORT = ("Organic route: islands removed and holes filled in ScanRuler, closed into a manifold solid (winding number + "
+                  "marching cubes, sealed crevices kept as cavities), decimated keeping it closed (MeshLab), written as a faceted STEP solid.")
+
+
+def organic_autopilot(wb, phase, log, emit):
+    """The organic route without Swift: repair and close, the bodies shape is sure of, the check. True when it failed."""
+    phase("organic", "Repairing the scan into a solid")
+    log(wb.organic())
+    if getattr(wb, "whole", None):          # bodies without Swift: pieces and rings, what shape says for sure
+        phase("bodies", "Finding the bodies")
+        try:
+            log(wb.auto_bodies())
+        except Exception:       # finding bodies never costs the delivery: the solid stays one body
+            log("[run] finding the bodies failed, the solid stays one body:\n" + traceback.format_exc())
+    phase("check", "Validating the solid against the scan")
+    check = wb.check("organic")
+    log(check)
+    emit("validation", result=wb.last_validation, summary=check)
+    return wb.last_validation is None or wb.last_validation["verdict"] != "PASS"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("stl")
@@ -152,21 +173,8 @@ def main():
                 wb.close()
                 wb = Workbench(stl, work, page=True, show_browser=not a.headless_browser)
             wb.emit, wb.narrate = emit, True
-            phase("organic", "Repairing the scan into a solid")
-            log(wb.organic())
-            if getattr(wb, "whole", None):          # bodies without Swift: pieces and rings, what shape says for sure
-                phase("bodies", "Finding the bodies")
-                try:
-                    log(wb.auto_bodies())
-                except Exception:       # finding bodies never costs the delivery: the solid stays one body
-                    log("[run] finding the bodies failed, the solid stays one body:\n" + traceback.format_exc())
-            phase("check", "Validating the solid against the scan")
-            check = wb.check("organic")
-            log(check)
-            emit("validation", result=wb.last_validation, summary=check)
-            failed = wb.last_validation is None or wb.last_validation["verdict"] != "PASS"
-            report = ("Organic route: islands removed and holes filled in ScanRuler, closed into a manifold solid (winding number + "
-                      "marching cubes, sealed crevices kept as cavities), decimated keeping it closed (MeshLab), written as a faceted STEP solid.")
+            failed = organic_autopilot(wb, phase, log, emit)
+            report = ORGANIC_REPORT
         elif a.no_swift:
             report = "A real scan needs Swift: the exact-reading pass works on CAD-exported meshes only."
             log(f"[run] {report}")
@@ -186,6 +194,11 @@ def main():
                        f"{flat['point']} ({flat['share']:.0%} of the surface): that normal is the up/down axis, and that is where to start.")
             report, failed = agent.run(msg)
             failed = failed or not agent.passed
+            if failed and organic:
+                # a run ends NOT VALIDATED only when Swift and the autopilot both fail
+                log("[run] Swift ended without a pass: delivering the autopilot's organic solid")
+                if not organic_autopilot(wb, phase, log, emit):
+                    failed, report = False, (report or "") + "\n\nSwift ended without a pass; delivered instead: " + ORGANIC_REPORT
 
         r = wb.last_validation
         organic = bool(r and r.get("mode") == "organic")
@@ -202,7 +215,8 @@ def main():
         else:
             status, step = "NOT VALIDATED", work / "best_attempt_CAD.step"
         md = [f"# {stl.stem}: reverse-engineering report", "",
-              f"**{status}**: {step.name} (mode {mode}, {time.time() - t0:.0f} s)", "",
+              f"**{status}**: {step.name} (mode {mode}, {time.time() - t0:.0f} s)"
+              + (f"; for a slicer, the same triangles: {step.with_suffix('.3mf').name}" if step.with_suffix(".3mf").exists() else ""), "",
               "## Validation (independent)", "```", summary(r) if r else "no model was checked", "```", "",
               "## How it was built", report or "(no report)"]
         if organic and getattr(wb, "bodies", None):

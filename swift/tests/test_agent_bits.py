@@ -46,3 +46,15 @@ from agent import BUDGET, est  # noqa: E402
 assert sum(est(m) for m in msgs) <= BUDGET * 1.1, sum(est(m) for m in msgs)
 assert isinstance(msgs[-1]["content"], list) and sum(isinstance(m["content"], list) for m in msgs) == 1
 print("ok")
+
+# give_up on a scan with no closed solid and most turns left: refused once, then allowed; late or with a solid, allowed
+from types import SimpleNamespace  # noqa: E402
+ag = Agent(SimpleNamespace(), "scan", log=lambda *a: None, max_turns=60)
+ag.turn = 9
+assert str(ag.t_finish("stuck", give_up=True)).startswith("refused") and ag.t_finish("stuck", give_up=True) is None
+ag = Agent(SimpleNamespace(), "scan", log=lambda *a: None, max_turns=60)
+ag.turn = 45
+assert ag.t_finish("stuck", give_up=True) is None
+ag = Agent(SimpleNamespace(whole="x.stl"), "scan", log=lambda *a: None, max_turns=60)
+assert ag.t_finish("stuck", give_up=True) is None
+print("ok give-up guard")

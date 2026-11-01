@@ -241,6 +241,8 @@ class Workbench:
         report.append(f"closed on a {grid:.3g} mm grid: {len(solid)} triangles, {closed.name}")
         reduced = reduce_mesh(solid, max_triangles)
         write_stl(self.reduced, reduced)
+        self.look = self.work / f"{stem}_look.stl"         # what the part finders read: evenly coarse
+        write_stl(self.look, reduce_mesh(solid, max_triangles, safe=False))
         report.append(f"reduced to {len(reduced)} triangles (MeshLab quadric, topology kept, thin walls kept from cutting through each other): {self.reduced.name}")
         info = write_step(self.organic_step, read_stl(self.reduced), stem)
         report.append(f"STEP solid: {self.organic_step.name}, {info['faces']} faces, {info['solids']} solids, {info['voids']} cavities"
@@ -302,6 +304,8 @@ class Workbench:
         # each name at the body's own surface point nearest its centre (a ring's centre is in its bore)
         notes = [(n, b.reshape(-1, 3)[np.linalg.norm(b.reshape(-1, 3) - b.reshape(-1, 3).mean(0), axis=1).argmin()].tolist()) for n, b in bodies]
         draw(t, lab, notes, png, "bodies as written to the STEP")
+        from meshio_min import write_3mf
+        write_3mf(self.organic_step.with_suffix(".3mf"), bodies)      # the same bodies for a slicer, a few MB
         self.emit("bodies", bodies=self.bodies, dropped=dropped, cuts=cuts, image=str(png))
 
     def body_pieces(self):
@@ -321,11 +325,19 @@ class Workbench:
         if not getattr(self, "whole", None):
             return "no organic solid yet: run the organic route first"
         v, f, of, *_ = _pieces(read_stl(self.whole))
-        t = v[f]
-        sel = np.ones(len(t), bool) if near is None else np.linalg.norm(t.mean(1) - np.asarray(near, float), axis=1) < float(within)
-        if sel.sum() < 50:
+        t, ot = v[f], of
+        look = getattr(self, "look", None)
+        if look and Path(look).exists():
+            # rings read the evenly decimated copy (flat faces grow whole there); a face's piece is that of the
+            # solid's face nearest it. Rods read the solid: they follow its own surface further along
+            from scipy.spatial import cKDTree
+            t = read_stl(look)
+            ot = of[cKDTree(v[f].mean(1)).query(t.mean(1))[1]]
+        near_of = lambda x: np.ones(len(x), bool) if near is None else np.linalg.norm(x.mean(1) - np.asarray(near, float), axis=1) < float(within)
+        sel, sel_s = near_of(t), near_of(v[f])
+        if sel.sum() < 50 or sel_s.sum() < 50:
             return f"nothing of the solid within {within} mm of {near}"
-        rods, rings = find_rods(t[sel], of[sel], solid=t), find(t[sel], of[sel])
+        rods, rings = find_rods(v[f][sel_s], of[sel_s], solid=v[f]), find(t[sel], ot[sel])
         self.rods, self.rings = getattr(self, "rods", None) or [], getattr(self, "rings", None) or []
         same_rod = lambda a, b: abs(np.dot(a["axis"], b["axis"])) > 0.995 and abs(a["radius"] - b["radius"]) < 0.2 * b["radius"] and \
             np.linalg.norm(np.cross(np.subtract(a["centre"], b["centre"]), b["axis"])) < b["radius"]

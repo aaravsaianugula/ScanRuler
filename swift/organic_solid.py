@@ -124,15 +124,17 @@ def self_intersecting(v, f):
     return ms.current_mesh().face_selection_array()
 
 
-def reduce_mesh(tris, faces, passes=12):
+def reduce_mesh(tris, faces, passes=12, safe=True):
     """Quadric decimation to about faces triangles that keeps a closed manifold one (MeshLab, preservetopology).
     ScanRuler's mesh.reduce is not used here: on a dense closed scan it leaves non-manifold edges.
     Decimation knows nothing of the other side of a thin wall (a hair tip, a finger on the staff): collapses
     there push one wall through the other, and a small shell can turn inside out - surface showing its back.
-    Where that happens the dense mesh around it is kept out of the decimation and it runs again."""
+    Where that happens the dense mesh around it is kept out of the decimation and it runs again.
+    safe=False: one plain pass, evenly coarse, for the part finders (rings.py), whose flat-face growing a
+    dense kept patch breaks up (a gear lost on Kurisu); never delivered."""
     import pymeshlab
     from scipy.spatial import cKDTree
-    if len(tris) > 6 * faces:      # in stages: what is kept out of the last one is then 3x coarser than the closing's cells
+    if safe and len(tris) > 6 * faces:      # in stages: what is kept out of the last one is then 3x coarser than the closing's cells
         tris = reduce_mesh(tris, 3 * faces, passes)
     v, f = indexed(tris)
     keep, tree = np.zeros(len(v), bool), cKDTree(v)
@@ -148,6 +150,8 @@ def reduce_mesh(tris, faces, passes=12):
         m = ms.current_mesh()
         rv, rf = m.vertex_matrix(), m.face_matrix()
         out = rv[rf]
+        if not safe:
+            return out
         bad = list(out[self_intersecting(rv, rf)])
         # a shell turned inside out: negative, and not where the dense mesh has a cavity
         bad += [p for p in pieces(out) if signed(p) < 0 and not any(((p.mean((0, 1)) >= lo) & (p.mean((0, 1)) <= hi)).all() for lo, hi in cavities)]

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Binary/ASCII STL read and binary STL write, numpy only."""
+"""Binary/ASCII STL read, binary STL and 3MF write, numpy only."""
 import struct
 
 import numpy as np
@@ -27,3 +27,32 @@ def write_stl(path, tris):
         fh.write(b"scanruler-swift".ljust(80, b"\0"))
         fh.write(struct.pack("<I", len(tris)))
         fh.write(rec.tobytes())
+
+
+def write_3mf(path, bodies):
+    """bodies: [(name, triangles)] as a 3MF in millimetres, an object per body, its triangles as they are
+    (vertices shared at 1e-6 mm, as the STEP writer shares them). The print copy of the faceted STEP: the
+    same surface at a few percent of the size, which slicers open directly."""
+    import zipfile
+    from xml.sax.saxutils import quoteattr
+    f6 = lambda x: f"{x:.6f}".rstrip("0").rstrip(".")
+    objs, items = [], []
+    for i, (name, tris) in enumerate(bodies, 1):
+        v, inv = np.unique(np.round(np.asarray(tris, float).reshape(-1, 3), 6), axis=0, return_inverse=True)
+        f = inv.reshape(-1, 3)
+        f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]
+        vs = "".join(f'<vertex x="{f6(a)}" y="{f6(b)}" z="{f6(c)}"/>' for a, b, c in v)
+        ts = "".join(f'<triangle v1="{a}" v2="{b}" v3="{c}"/>' for a, b, c in f)
+        objs.append(f'<object id="{i}" name={quoteattr(str(name))} type="model"><mesh><vertices>{vs}</vertices>'
+                    f'<triangles>{ts}</triangles></mesh></object>')
+        items.append(f'<item objectid="{i}"/>')
+    model = ('<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" '
+             'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">'
+             f'<resources>{"".join(objs)}</resources><build>{"".join(items)}</build></model>')
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                   '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>')
+        z.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   '<Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>')
+        z.writestr("3D/3dmodel.model", model)

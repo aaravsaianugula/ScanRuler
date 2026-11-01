@@ -173,6 +173,7 @@ class Agent:
         self.passed = False
         self.best = None            # (score, validation) of the best model seen
         self.pinned = set()         # message indices kept verbatim (guide text)
+        self.turn, self.give_ups = 0, 0
 
     # -- tools -----------------------------------------------------------
     def t_check(self):
@@ -291,6 +292,16 @@ class Agent:
         if not give_up and not (self.passed and self.checked_at == self.changes):
             why = "the model changed since the last check" if self.checked_at != self.changes else "the last check did not PASS"
             return f"refused: {why}. Run check and fix what fails, or finish with give_up=true explaining every deviation."
+        if give_up and self.mode != "cad":
+            # a scan always has the organic route: giving up early with no closed solid leaves the user nothing.
+            # Refused once, and only while over a third of the turns are left, so it cannot loop
+            self.give_ups += 1
+            left = self.max_turns - self.turn
+            if self.give_ups == 1 and left > self.max_turns / 3 and not getattr(self.wb, "whole", None):
+                return (f"refused: {left} of {self.max_turns} turns left and no closed solid yet. Next: call organic_route "
+                        "(when ScanRuler has nothing to repair it carries on from the scan as it is, and closes what is open), "
+                        "then propose_bodies or group_bodies on what it made, then check. If organic_route itself fails, its "
+                        "answer says what to do next. Ask for give_up again only when that cannot work.")
         return None
 
     # -- loop ------------------------------------------------------------
@@ -338,6 +349,7 @@ class Agent:
         sys_prompt = (PROMPTS / f"{self.mode}.md").read_text(encoding="utf-8")
         msgs = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": first_message}]
         for turn in range(self.max_turns):
+            self.turn = turn
             self.compact(msgs)
             self.emit("turn", n=turn, max=self.max_turns, context=int(sum(est(m) for m in msgs)), limit=CTX_TOKENS)
             stream = self._stream()
