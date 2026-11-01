@@ -5,6 +5,12 @@
 
 # ScanRuler by CNC Kitchen
 
+> **This is a fork.** [ScanRuler](https://github.com/CNCKitchen/scanruler) is made by
+> [CNC Kitchen](https://www.cnckitchen.com/) (Stefan Hermann), and all credit for it goes to them.
+> This fork adds [`swift/`](swift/) - reverse-engineering scans into validated CAD with a local
+> model driving ScanRuler (organic scans become closed STEP solids split into named bodies) - and
+> [`desktop/`](desktop/), a desktop app for it. Same license (AGPL-3.0); changes are in the git history.
+
 **Use it live at <https://scanruler.com/>** — nothing to install.
 
 > **Open source under the AGPL, with commercial licenses available.** Want to

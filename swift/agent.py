@@ -106,7 +106,7 @@ def chat(messages, tools, thinking=True, max_tokens=6000, retries=3, on_delta=No
     for k in range(retries):
         try:
             return _read_stream(urllib.request.urlopen(req, timeout=1800), on_delta or (lambda *_: None))
-        except Exception:  # the Gateway queues behind Sena's live turns; a dropped call is retried
+        except Exception:  # the Gateway queues behind other clients' turns; a dropped call is retried
             if k == retries - 1:
                 raise
             time.sleep(5 * (k + 1))

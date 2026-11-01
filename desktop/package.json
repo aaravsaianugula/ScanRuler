@@ -2,10 +2,10 @@
   "name": "scanruler-swift-studio",
   "productName": "ScanRuler Swift Studio",
   "version": "1.0.0",
-  "description": "Desktop app: scans in, validated CAD out â€” ScanRuler driven by Swift 1.5",
+  "description": "Desktop app: scans in, validated CAD out - ScanRuler driven by Swift 1.5",
   "private": true,
   "license": "AGPL-3.0-only",
-  "author": "Aarav Sai Anugula",
+  "author": "aaravsaianugula",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "node scripts/write-defaults.cjs && vite build && electron .",
@@ -15,7 +15,7 @@
     "dist": "npm run build && electron-builder --win"
   },
   "build": {
-    "appId": "dev.aarav.scanruler-swift-studio",
+    "appId": "io.github.aaravsaianugula.scanruler-swift-studio",
     "productName": "ScanRuler Swift Studio",
     "directories": {
       "output": "release",
