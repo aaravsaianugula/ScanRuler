@@ -351,14 +351,18 @@ def edge_counts(tris):
     return int((n == 1).sum()), int((n > 2).sum())
 
 
-def enclosing(tris, pts, tid, eps=0.05):
+def enclosing(tris, pts, eps=0.05):
     """Which sample points lie on surface that bounds the scan's volume (generalized winding number):
     inside just behind them, outside just in front. The rest is single sheet - a flap outside the body,
-    a stray layer inside it, a patch facing in - that no closed solid can lie on."""
+    a stray layer inside it, a patch facing in - that no closed solid can lie on. "Behind" is along the
+    normal of the surface around the point (its 24 nearest triangles), not of its own triangle, which a
+    noisy scan tips every way; eps should clear the noise."""
     import igl
     v, inv = np.unique(tris.reshape(-1, 3), axis=0, return_inverse=True)
     f = inv.reshape(-1, 3).astype(np.int64)
-    nrm = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])[tid]
+    n = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])       # area-weighted
+    _, near = cKDTree(tris.mean(1)).query(pts, k=min(24, len(tris)))
+    nrm = n[near].sum(1) if near.ndim == 2 else n[near]
     nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-20
     return (igl.fast_winding_number(v, f, pts - eps * nrm) > 0.75) & (igl.fast_winding_number(v, f, pts + eps * nrm) < 0.25)
 
@@ -388,7 +392,7 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
 
     pr, tr = sample_area(R0, count(R0))
     scanned = own[tr]
-    bounding = enclosing(R0, pr, tr)
+    bounding = enclosing(R0, pr, eps=max(0.05, 2 * noise))
     pa = pr[scanned & bounding]
     d_ar, sg_ar = MeshDistance(R, spacing)(pa)
     pb, _ = sample_area(R, count(R), seed=2)
@@ -422,6 +426,8 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
         "p99": max(s_ar["p99"], s_ba["p99"]) <= tolr["p99"],
         "max_area": past["scan"] <= 1e-3 * measured_a and past["solid"] <= 1e-3 * measured_b,
         "max_bands": max(bands, default=0) < min_band,
+        # a verdict on a sliver of the scan is none: at least a quarter of its own surface must be measured
+        "coverage": bool((scanned & bounding).sum() >= 0.25 * scanned.sum()),
     }
     devs = [dict(c, of="model", kind="off the scan") for c in clusters(pb[supported], d_ra[supported], sg[supported], tolr["p99"], spacing)]
     return dict(

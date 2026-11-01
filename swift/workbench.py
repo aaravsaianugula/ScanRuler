@@ -60,13 +60,18 @@ class Workbench:
         self.mcp = ScanRulerMCP(self.work, headless=False, extra=["--serve", str(REPO / "dist"), "--port", str(port)],
                                 env={"SCANRULER_MCP_TOKEN": token, "SCANRULER_MCP_CONFIG_DIR": str(cfg)})
         link = f"http://127.0.0.1:{port}/#agent={port}:{token}"
-        if self.on_link:
-            self.on_link(link)
+        for attempt in range(2):        # a busy machine can keep a browser from pairing in time: start it again once
+            if self.on_link:
+                self.on_link(link)
+            else:
+                if self.browser:
+                    self.browser.kill()
+                self.browser = subprocess.Popen(["node", str(REPO / "swift" / "page.mjs"), link] + ([] if show else ["--headless"]),
+                                                stdin=subprocess.PIPE, cwd=str(REPO), text=True)
+            txt, _, err = self.mcp.call("scanruler_wait", {"for": "page", "timeoutSeconds": 180})
+            if not err and '"connected":true' in txt.replace(" ", ""):
+                break
         else:
-            self.browser = subprocess.Popen(["node", str(REPO / "swift" / "page.mjs"), link] + ([] if show else ["--headless"]),
-                                            stdin=subprocess.PIPE, cwd=str(REPO), text=True)
-        txt, _, err = self.mcp.call("scanruler_wait", {"for": "page", "timeoutSeconds": 180})
-        if err or '"connected":true' not in txt.replace(" ", ""):
             raise RuntimeError(f"the ScanRuler page did not connect: {txt[:500]}")
         txt, err = self.batch([{"tool": "scan_open", "arguments": {"path": str(self.input), "units": "mm"}}])
         if err or '"ok":false' in txt:
@@ -199,7 +204,7 @@ class Workbench:
         encloses no volume is thickened in ScanRuler first), reduce it to max_triangles keeping it closed, and
         write it as a closed STEP solid. The
         validator holds it to the scan's noise, whatever the caller asks for. Needs the page."""
-        from organic_solid import close_mesh, grid_for, reduce_mesh
+        from organic_solid import close_mesh, grid_for, orient, pieces, reduce_mesh
         from meshio_min import write_stl
         from step_faceted import write_step
         stem = self.stl.stem
@@ -219,7 +224,7 @@ class Workbench:
                 res, body = {"ok": False}, txt
             # "No hole/piece ... smaller than that": nothing to do, not a failure
             ok = res.get("ok") or str((res.get("error") or {}).get("message", "")).startswith(("No hole", "No piece"))
-            report.append(f"{c['tool']}: {'ok' if ok else 'FAILED'} {body[:600]}")
+            report.append(f"{c['tool']}: {'ok' if ok else 'FAILED'} {body[:600] if res.get('ok') or not ok else res['error']['message']}")
             return res.get("result") or {} if ok else None
 
         # a second run starts from the scan again (fails harmlessly on a first); the panel keeps its sizes, so
@@ -235,7 +240,9 @@ class Workbench:
                 return "\n".join(report)
             if c["arguments"] is curved:
                 self.hole_size = getattr(self, "hole_size", None) or (res.get("edit") or {}).get("maxSize")
-        scan = read_stl(self.repaired)
+        # every piece facing out, in the delivered repaired scan too: the validator reads it as written
+        scan = np.concatenate(orient(pieces(read_stl(self.repaired))))
+        write_stl(self.repaired, scan)
         grid = grid or grid_for(scan)
         solid = close_mesh(scan, grid)
         if not len(solid):
@@ -244,7 +251,9 @@ class Workbench:
             if run({"tool": "mesh_shell", "arguments": {"mode": "thicken", "side": "in"}}) is None or \
                     run({"tool": "mesh_export", "arguments": {"part": "edited", "path": str(self.repaired)}}) is None:
                 return "\n".join(report)
-            solid = close_mesh(read_stl(self.repaired), grid)
+            scan = np.concatenate(orient(pieces(read_stl(self.repaired))))
+            write_stl(self.repaired, scan)
+            solid = close_mesh(scan, grid)
             if not len(solid):
                 report.append("FAILED: still no volume after thickening")
                 return "\n".join(report)

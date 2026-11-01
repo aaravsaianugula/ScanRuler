@@ -31,7 +31,7 @@ v = volume(solid)
 want = 4 / 3 * np.pi * (1000 - 27)
 assert abs(v - want) < 0.015 * want, (v, want)          # dropping the cavity would add 2.8 %
 pts, tid = sample(scan, 0.5, return_tri=True)
-on = enclosing(scan, pts, tid)
+on = enclosing(scan, pts)
 on_sphere = (tid < len(sphere)) | (tid >= len(scan) - len(void))
 assert on[on_sphere].mean() > 0.97 and on[~on_sphere].mean() < 0.05, (on[on_sphere].mean(), on[~on_sphere].mean())
 print("ok", len(solid), "triangles, volume", round(v, 1))
