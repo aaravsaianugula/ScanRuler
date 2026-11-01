@@ -118,6 +118,7 @@ function startRun(_e, opts) {
   const keep = (e) => {
     if (e.type === 'start' && e.work && !r.rec) {
       try { r.rec = fs.createWriteStream(path.join(e.work, 'events.jsonl'), { flags: 'w' }) } catch { /* not recorded */ }
+      r.watch = watchStages(e.work, path.parse(e.stl || opts.stl).name, keep)
     }
     r.rec?.write(JSON.stringify(e) + '\n')
     send('run:event', e)
@@ -129,8 +130,35 @@ function startRun(_e, opts) {
   })
   readline.createInterface({ input: child.stderr }).on('line', (line) => keep({ type: 'stderr', text: line }))
   child.on('error', (err) => send('run:event', { type: 'error', text: `Could not start Python: ${err.message}` }))
-  child.on('exit', (code) => { r.rec?.end(); run = null; send('run:exit', { code }) })
+  child.on('exit', (code) => { r.watch?.(); r.rec?.end(); run = null; send('run:exit', { code }) })
   return { ok: true }
+}
+
+// the scan's way to a solid, as the run writes it: <stem>_repaired / _closed / _reduced / _bodies.stl in the work
+// folder. Each is announced once, when its size has held still for two seconds (written whole), so the
+// director can show the mesh turning into the solid. Returns the stop function.
+function watchStages(work, stem, emit) {
+  const kinds = ['repaired', 'closed', 'reduced', 'bodies']
+  const done = new Set(), timers = new Map()
+  let w
+  try {
+    w = fs.watch(work, (_ev, name) => {
+      const kind = kinds.find((k) => name === `${stem}_${k}.stl`)
+      if (!kind || done.has(kind) || timers.has(kind)) return
+      const file = path.join(work, name)
+      let last = -1, still = 0
+      timers.set(kind, setInterval(() => {
+        let size = -1
+        try { size = fs.statSync(file).size } catch { /* not there yet */ }
+        still = size > 84 && size === last ? still + 1 : 0
+        last = size
+        if (still < 2) return
+        clearInterval(timers.get(kind)); timers.delete(kind); done.add(kind)
+        emit({ type: 'stage', kind, file, bytes: size, t: Date.now() / 1000 })
+      }, 1000))
+    })
+  } catch { return () => {} }
+  return () => { w.close(); for (const t of timers.values()) clearInterval(t) }
 }
 
 function stopRun() {
@@ -167,7 +195,10 @@ ipcMain.handle('fs:image', (_e, file, work) => {
   return `data:image/png;base64,${fs.readFileSync(file).toString('base64')}`
 })
 // the run's mesh for the director's own 3D view: STL files only
-ipcMain.handle('fs:mesh', (_e, file) => (typeof file === 'string' && /\.stl$/i.test(file) && fs.existsSync(file) ? fs.readFileSync(file) : null))
+ipcMain.handle('fs:mesh', (_e, file) => {
+  if (typeof file !== 'string' || !/\.stl$/i.test(file)) return null
+  try { return fs.statSync(file).size <= 200e6 ? fs.readFileSync(file) : null } catch { return null }   // too big to film: no view, no hang
+})
 ipcMain.handle('health', async () => {
   const s = loadSettings()
   try {

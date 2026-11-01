@@ -24,8 +24,12 @@ export function shotFor(activity, status, focus, nowS) {
 }
 
 const BAND = { sweep: [0.23, 0.44, 0.85], hero: [0.9, 0.23, 0.18] }
+// the raw scan cool grey, the closed solid warm paper
+const STAGE_COLOR = { scan: 0x8e9bab, repaired: 0x9aa7b4, closed: 0xd9d2c4, reduced: 0xe8e1d4, bodies: 0xe8e1d4 }
+// a stage bigger than this (a full-resolution closed solid) is announced but not filmed: the reduced solid follows
+export const FILMABLE_BYTES = 90e6
 
-export default function Director({ stl, shot, focus, bodies, clusters, visible, onLabels }) {
+export default function Director({ stl, shot, focus, bodies, clusters, visible, onLabels, stage }) {
   const host = useRef(null)
   const live = useRef({})            // what the render loop reads each frame
   const [state, setState] = useState('loading')
@@ -50,10 +54,11 @@ export default function Director({ stl, shot, focus, bodies, clusters, visible, 
     const rim = new THREE.DirectionalLight(0x3a6fd8, 2.6)
     scene.add(key, rim)
 
+    renderer.localClippingEnabled = true
+    renderer.domElement.addEventListener('webglcontextlost', (e) => { e.preventDefault(); if (alive) setState('lost') })
     const u = { uBand: { value: 0 }, uBandOn: { value: 0 }, uBandW: { value: 1 }, uBandColor: { value: new THREE.Vector3(...BAND.sweep) }, uFocus: { value: new THREE.Vector3() }, uFocusR: { value: 1 }, uFocusOn: { value: 0 } }
-    const material = new THREE.MeshStandardMaterial({ color: 0x8e9bab, roughness: 0.5, metalness: 0.12 })
     // a scan band that sweeps the surface and a yellow ring where the run looks, drawn on the mesh itself
-    material.onBeforeCompile = (sh) => {
+    const hook = (sh) => {
       Object.assign(sh.uniforms, u)
       sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vW;')
         .replace('#include <project_vertex>', '#include <project_vertex>\nvW = (modelMatrix * vec4(transformed, 1.0)).xyz;')
@@ -66,25 +71,52 @@ float d = length(vW - uFocus);
 float ring = uFocusOn * (exp(-pow((d - uFocusR) / (uFocusR * 0.07), 2.0)) + 0.22 * step(d, uFocusR));
 gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.96, 0.77, 0.09), clamp(ring, 0.0, 1.0) * 0.85);`)
     }
+    const makeMaterial = (color) => {
+      const m = new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.12 })
+      m.onBeforeCompile = hook
+      return m
+    }
+    const parse = (bytes) => new STLLoader().parse(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))
     const extras = new THREE.Group()
     scene.add(extras)
 
-    let box = null, centre = new THREE.Vector3(), R = 100
+    let box = null, centre = new THREE.Vector3(), R = 100, current = null, wipe = null
     const look = new THREE.Vector3()
     let az = -Math.PI / 3, lastShot = null, shotStart = 0, last = performance.now(), acc = 0, frame = 0
     const still = matchMedia('(prefers-reduced-motion: reduce)').matches
 
+    // the next stage of the scan's way to a solid replaces the one shown, wiped in from the floor up
+    live.current.swap = (bytes, kind) => {
+      if (!box) return
+      let geom
+      try { geom = parse(bytes) } catch { return }              // a file that will not read: keep what is shown
+      const mesh = new THREE.Mesh(geom, makeMaterial(STAGE_COLOR[kind] ?? 0xe8e1d4))
+      mesh.material.clippingPlanes = [new THREE.Plane(new THREE.Vector3(0, 0, -1), box.min.z)]
+      if (current) current.material.clippingPlanes = [new THREE.Plane(new THREE.Vector3(0, 0, 1), -box.min.z)]
+      scene.add(mesh)
+      if (wipe) finishWipe()
+      wipe = { old: current, neu: mesh, start: performance.now() }
+      current = mesh
+    }
+    const finishWipe = () => {
+      if (wipe.old) { scene.remove(wipe.old); wipe.old.geometry.dispose(); wipe.old.material.dispose() }
+      wipe.neu.material.clippingPlanes = null
+      wipe.neu.material.needsUpdate = true
+      wipe = null
+    }
+
     window.studio.readMesh(stl).then((bytes) => {
       if (!alive) return
       if (!bytes) { setState('missing'); return }
-      const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
-      const geom = new STLLoader().parse(buf)
+      let geom
+      try { geom = parse(bytes) } catch { setState('missing'); return }
       geom.computeBoundingBox()
       box = geom.boundingBox
       box.getCenter(centre)
       R = box.getSize(new THREE.Vector3()).length() / 2
       camera.near = R / 200; camera.far = R * 40; camera.updateProjectionMatrix()
-      scene.add(new THREE.Mesh(geom, material))
+      current = new THREE.Mesh(geom, makeMaterial(STAGE_COLOR.scan))
+      scene.add(current)
       const grid = new THREE.GridHelper(R * 4, 40, 0x3a6fd8, 0x1b2233)
       grid.rotation.x = Math.PI / 2
       grid.position.set(centre.x, centre.y, box.min.z - R * 0.002)
@@ -157,6 +189,15 @@ gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.96, 0.77, 0.09), clamp(ring, 0.0
       u.uBand.value = s === 'hero' ? box.min.z + span * ((t / 6) % 1) : box.min.z + span * (0.5 + 0.5 * Math.sin(t * 1.3))
       u.uFocusOn.value = s === 'dolly' && f ? 1 : 0
       if (f) { u.uFocus.value.set(...f.p); u.uFocusR.value = Math.min(R * 0.6, Math.max(R * 0.04, f.r || R * 0.1)) * (1 + 0.08 * Math.sin(now / 180)) }
+      if (wipe) {
+        // a yellow line climbs the part: the new stage below it, the old one above
+        const p = Math.min(1, (now - wipe.start) / (still ? 1 : 3400))
+        const h = box.min.z - span * 0.02 + span * 1.04 * (p * p * (3 - 2 * p))
+        wipe.neu.material.clippingPlanes[0].constant = h
+        if (wipe.old) wipe.old.material.clippingPlanes[0].constant = -h
+        u.uBandOn.value = 1; u.uBand.value = h; u.uBandW.value = span * 0.012; u.uBandColor.value.set(0.96, 0.77, 0.09)
+        if (p >= 1) finishWipe()
+      }
 
       renderer.render(scene, camera)
       // where the overlays sit on screen this frame
@@ -179,8 +220,7 @@ gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.96, 0.77, 0.09), clamp(ring, 0.0
       alive = false
       cancelAnimationFrame(raf)
       ro.disconnect()
-      scene.traverse((o) => { o.geometry?.dispose(); if (o.material && o.material !== material) o.material.dispose?.() })
-      material.dispose()
+      scene.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.() })
       renderer.dispose()
       renderer.domElement.remove()
     }
@@ -209,9 +249,17 @@ gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.96, 0.77, 0.09), clamp(ring, 0.0
     })
   }, [bodies, clusters, state])
 
+  // each new stage of the scan's way to a solid, once it is written whole
+  useEffect(() => {
+    if (!stage || state !== 'ready' || stage.bytes > FILMABLE_BYTES) return
+    let alive = true
+    window.studio.readMesh(stage.file).then((b) => { if (alive && b) live.current.swap?.(b, stage.kind) }).catch(() => { /* keep what is shown */ })
+    return () => { alive = false }
+  }, [stage?.file, stage?.bytes, state])
+
   return (
     <div className="director" ref={host}>
-      {state !== 'ready' && <div className="director-wait">{state === 'loading' ? 'LOADING THE SCAN…' : 'NO MESH TO FILM'}</div>}
+      {state !== 'ready' && <div className="director-wait">{{ loading: 'LOADING THE SCAN…', lost: '3D VIEW PAUSED · THE GRAPHICS CONTEXT WAS LOST' }[state] || 'NO MESH TO FILM'}</div>}
     </div>
   )
 }

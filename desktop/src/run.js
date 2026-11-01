@@ -29,6 +29,21 @@ export const initial = {
   turnTimes: [],           // when each Swift turn began
   focus: null,             // { p: [x, y, z], r, t }: where the last tool call looked, for the director's camera
   replay: false,           // a finished run read back from its events.jsonl
+  finish: null,            // { giveUp, report }: what Swift said when it ended the run
+  stages: [],              // [{ kind, file, bytes, t }]: the scan's way to a solid, as the work folder shows it
+  lastEventAt: null,       // when the run last said anything (ms): how long it has been quiet
+}
+
+export const STAGES = [['scan', 'SCAN'], ['repaired', 'REPAIRED'], ['closed', 'CLOSED'], ['reduced', 'SOLID'], ['bodies', 'BODIES']]
+
+// how a finished run ended, in words: the verdict and why
+export function outcomeOf(s) {
+  if (s.status === 'error') return { ok: false, title: 'STOPPED BY AN ERROR', why: s.error || 'The run stopped.' }
+  if (s.status !== 'done') return null
+  if (s.done?.status === 'PASS') return { ok: true, title: 'VALIDATED', why: `${s.done.step?.split(/[\\/]/).pop() || 'The STEP'} passed the independent check.` }
+  const said = (s.finish?.report || s.turns[s.turns.length - 1]?.content || '').trim()
+  const title = s.finish?.giveUp ? 'SWIFT GAVE UP' : s.validations.length ? 'NOT VALIDATED' : 'ENDED WITHOUT A SOLID'
+  return { ok: false, title, why: said || (s.validations.length ? 'The last check did not pass.' : 'No closed solid reached the validator.') }
 }
 
 const vec = (v) => (Array.isArray(v) && v.length === 3 && v.every((x) => typeof x === 'number') ? v : null)
@@ -80,7 +95,14 @@ export function activityOf(name, args) {
 const last = (a) => a[a.length - 1]
 
 export function reduce(s, e) {
+  const n = step(s, e)
+  return n === s || e.type === 'reset' ? n : { ...n, lastEventAt: Date.now() }
+}
+
+function step(s, e) {
   switch (e.type) {
+    case 'stage':
+      return { ...s, stages: [...s.stages.filter((x) => x.kind !== e.kind), { kind: e.kind, file: e.file, bytes: e.bytes, t: e.t }] }
     case 'reset':
       return { ...initial, status: 'running', stl: e.stl, swift: e.swift, startedAt: Date.now(), replay: !!e.replay }
     case 'start':
@@ -109,7 +131,9 @@ export function reduce(s, e) {
     }
     case 'tool': {
       const f = focusOf(e.args)
-      return { ...s, activity: activityOf(e.name, e.args), focus: f ? { ...f, t: e.t } : s.focus, timeline: [...s.timeline, { id: s.timeline.length, name: e.name, args: e.args, result: null, t: e.t }].slice(-300) }
+      let finish = s.finish
+      if (e.name === 'finish') { try { const a = JSON.parse(e.args || '{}'); finish = { giveUp: !!a.give_up, report: a.report || '' } } catch { finish = { giveUp: false, report: '' } } }
+      return { ...s, finish, activity: activityOf(e.name, e.args), focus: f ? { ...f, t: e.t } : s.focus, timeline: [...s.timeline, { id: s.timeline.length, name: e.name, args: e.args, result: null, t: e.t }].slice(-300) }
     }
     case 'tool_result': {
       const timeline = s.timeline.slice()

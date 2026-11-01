@@ -1,7 +1,27 @@
 import { BorderBeam } from 'border-beam'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Component, useCallback, useEffect, useRef, useState } from 'react'
 import { clock } from '../eta.js'
-import Director, { SHOTS, shotFor } from './Director.jsx'
+import { outcomeOf, STAGES } from '../run.js'
+import Director, { FILMABLE_BYTES, SHOTS, shotFor } from './Director.jsx'
+
+// a crash in the 3D view (a driver, a mesh it cannot draw) costs the view, never the app or the run
+class Guard extends Component {
+  state = { failed: false }
+  static getDerivedStateFromError() { return { failed: true } }
+  componentDidCatch(err) { console.error('director failed:', err) }
+  render() { return this.state.failed ? <div className="director-wait">3D VIEW UNAVAILABLE · SEE SCANRULER</div> : this.props.children }
+}
+
+// what a quiet run is waiting on, so a long step never looks like a hang
+function quietNote(run, now) {
+  if (run.status !== 'running' || !run.lastEventAt) return null
+  const s = (now - run.lastEventAt) / 1000
+  if (s < 45) return null
+  const pending = run.timeline.findLast((x) => x.result === null)
+  if (pending) return `STILL ON ${pending.name.toUpperCase()} · ${clock(s)} · long steps take minutes`
+  if (run.phase === 'swift') return `WAITING ON SWIFT (THE GATEWAY) · ${clock(s)}`
+  return `${(run.phaseLabel || 'WORKING').toUpperCase()} · ${clock(s)} without news · long steps take minutes`
+}
 import { ACTIVITY, summarize } from './SwiftPanels.jsx'
 
 const NOISE = '░▒▓█▀▄■□▪▫◘◙'
@@ -77,7 +97,14 @@ export default function LiveView({ run, elapsed, eta }) {
   const lastVal = run.validations[run.validations.length - 1]
   const director = view === 'director' && !!run.stl
   const thinking = status === 'running' && ['thinking', 'prefill', 'writing'].includes(run.activity)
-  const verdict = run.done?.status === 'PASS' ? 'VALIDATED' : 'NOT VALIDATED'
+  const end = outcomeOf(run)
+  const quiet = quietNote(run, Date.now())
+  const reached = new Set(['scan', ...run.stages.map((x) => x.kind)])
+  const latest = STAGES.map(([k]) => k).filter((k) => reached.has(k)).pop()
+  const stage = run.stages.filter((x) => x.bytes <= FILMABLE_BYTES).sort((a, b) => a.t - b.t).pop()
+  const showStages = run.mode === 'organic' || run.stages.length > 0
+  const [hideEnd, setHideEnd] = useState(false)
+  useEffect(() => setHideEnd(false), [run.startedAt])
 
   return (
     <section className="panel live" aria-label="Live view">
@@ -102,8 +129,10 @@ export default function LiveView({ run, elapsed, eta }) {
           )}
           {run.stl && (
             <div className={`director-layer ${director ? '' : 'off'} ${thinking ? 'letterbox' : ''}`} aria-hidden={!director}>
-              <Director stl={run.stl} shot={shot.id} focus={run.focus} bodies={run.bodies} clusters={lastVal?.result?.deviation_clusters}
-                visible={director} onLabels={(items) => labelSink.current?.(items)} />
+              <Guard>
+                <Director stl={run.stl} shot={shot.id} focus={run.focus} bodies={run.bodies} clusters={lastVal?.result?.deviation_clusters}
+                  visible={director} onLabels={(items) => labelSink.current?.(items)} stage={stage} />
+              </Guard>
               <div className="dlabels"><Labels register={register} /></div>
               <div className="hud">
                 <div className="hud-top">
@@ -111,14 +140,29 @@ export default function LiveView({ run, elapsed, eta }) {
                   <span className="hud-tc">{elapsed}</span>
                   {eta && <span className="hud-eta">ETA {clock(eta.left)}{eta.learning ? ' · first guess' : ''}<i style={{ width: `${eta.frac * 100}%` }} /></span>}
                 </div>
+                {showStages && (
+                  <div className="hud-stages" aria-label="From scan to solid">
+                    {STAGES.map(([k, l]) => <span key={k} className={`${reached.has(k) ? 'on' : ''} ${k === latest && status === 'running' ? 'now' : ''}`}>{l}</span>)}
+                  </div>
+                )}
+                {quiet && <div className="hud-quiet">{quiet}</div>}
                 {run.activity === 'measuring' && <div className="hud-scan" />}
                 <div className="hud-third" key={`${run.activity}-${lastTool?.id}`}>
-                  <b style={{ background: color }}>{status === 'running' ? label.toUpperCase() : status === 'done' ? verdict : 'STANDING BY'}</b>
-                  <span>{status === 'running' ? detail : run.done?.step?.split(/[\\/]/).pop() || ''}</span>
+                  {status === 'running' && <><b style={{ background: color }}>{label.toUpperCase()}</b><span>{detail}</span></>}
                 </div>
                 {plan && status === 'running' && <div className="hud-plan" key={plan.slice(0, 30)}><small>SWIFT ▸ PLAN</small>{plan}</div>}
                 {flash > 0 && <div className="hud-flash" key={flash} />}
               </div>
+            </div>
+          )}
+          {/* how the run ended and why, over either view: a run never just stops without saying so */}
+          {end && !hideEnd && (
+            <div className={`endcard ${end.ok ? 'ok' : 'bad'}`} role="status">
+              <button className="x" onClick={() => setHideEnd(true)} aria-label="Hide">✕</button>
+              <small>RUN ENDED · {elapsed}{run.turns.length ? ` · ${run.turns.length} turns` : ''}</small>
+              <b>{end.title}</b>
+              <p>{end.why}</p>
+              {!end.ok && <em>The full story is in REPORT; the reasoning panel keeps every turn.</em>}
             </div>
           )}
           <i className="corner tl" /><i className="corner tr" /><i className="corner bl" /><i className="corner br" />

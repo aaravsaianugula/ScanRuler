@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ThinkingOrb } from 'thinking-orbs'
 import { clock } from '../eta.js'
-import { PHASES } from '../run.js'
+import { outcomeOf, PHASES } from '../run.js'
 
 // orb state, label and Bauhaus colour per activity
 export const ACTIVITY = {
@@ -21,6 +21,7 @@ export const ACTIVITY = {
 export function OrbCard({ run, elapsed, eta }) {
   const [state, label, color] = ACTIVITY[run.activity] || ACTIVITY.idle
   const ctx = run.contextLimit ? Math.min(1, run.context / run.contextLimit) : 0
+  const end = outcomeOf(run)
   return (
     <section className="panel orb-card" aria-live="polite">
       <div className="orb-row">
@@ -28,8 +29,8 @@ export function OrbCard({ run, elapsed, eta }) {
           <ThinkingOrb state={state} size={64} theme="dark" color={color} paused={run.status !== 'running'} />
         </div>
         <div className="orb-text">
-          <div className="orb-label">{run.status === 'running' ? `${label}…` : run.status === 'done' ? 'Run complete' : run.status === 'error' ? 'Stopped' : 'Standing by'}</div>
-          <div className="orb-sub">{run.phaseLabel || '—'}</div>
+          <div className="orb-label">{run.status === 'running' ? `${label}…` : end ? (end.ok ? 'Run complete' : 'Run ended') : 'Standing by'}</div>
+          <div className={`orb-sub ${end && !end.ok ? 'bad' : ''}`}>{end ? end.title.toLowerCase().replace(/^./, (c) => c.toUpperCase()) : run.phaseLabel || '—'}</div>
           <div className="chips">
             <span className="chip">{run.swift ? 'SWIFT 1.5' : 'AUTOPILOT'}</span>
             {run.mode && <span className="chip yellow">{{ cad: 'CAD EXACT', organic: 'ORGANIC' }[run.mode] || 'SCAN'}</span>}
@@ -147,7 +148,7 @@ export function Timeline({ items }) {
       <ol className="tl" ref={box}>
         {items.length === 0 && <li className="term-dim">no actions yet</li>}
         {items.map((it) => (
-          <li key={it.id} className={`tl-item ${it.result === null ? 'pending' : ''} ${/FAIL|refused|failed|error/i.test(it.result || '') ? 'bad' : ''}`}>
+          <li key={it.id} className={`tl-item ${it.result === null && it.name !== 'finish' ? 'pending' : ''} ${/FAIL|refused|failed|error/i.test(it.result || '') || (it.name === 'finish' && /"give_up":\s*true/.test(it.args || '')) ? 'bad' : ''}`}>
             <button onClick={() => setOpen(open === it.id ? null : it.id)} aria-expanded={open === it.id}>
               <span className="tl-icon">{ICON[it.name] || '▸'}</span>
               <span className="tl-name">{it.name}</span>

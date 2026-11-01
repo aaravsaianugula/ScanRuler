@@ -336,3 +336,23 @@ button.turn-head:hover { color: var(--paper); }
 .turn-peek { color: #8d887f; }
 .to-live { position: absolute; right: 14px; bottom: 10px; background: var(--yellow); color: #000; border: 2px solid #000; box-shadow: 3px 3px 0 #000; font: 800 11px/1 var(--display); letter-spacing: 0.14em; padding: 6px 10px; }
 .head-btn { background: #0003; border: 1.5px solid #0006; color: #000; font: 800 9px/1 var(--display); letter-spacing: 0.14em; padding: 2px 6px; margin-right: 6px; }
+
+/* how a run ended, over the view */
+.endcard { position: absolute; z-index: 4; left: 50%; top: 18%; transform: translateX(-50%); width: min(560px, 80%); background: #000e; border: 3px solid var(--paper); box-shadow: 8px 8px 0 #000; padding: 14px 18px 12px; display: grid; gap: 6px; animation: pop 0.3s ease-out; }
+.endcard.bad { border-color: var(--red); box-shadow: 8px 8px 0 #000, 0 0 40px #e63b2e55; }
+.endcard.ok { border-color: #3ccf6e; }
+.endcard small { font: 700 10px/1 var(--mono); letter-spacing: 0.18em; color: var(--muted); }
+.endcard b { font: 800 30px/1 var(--display); letter-spacing: 0.06em; }
+.endcard.bad b { color: var(--red); } .endcard.ok b { color: #3ccf6e; }
+.endcard p { margin: 0; font: 17px/1.15 var(--term); color: var(--paper); max-height: 7.2em; overflow: auto; white-space: pre-wrap; }
+.endcard em { font-style: normal; font-size: 11px; color: var(--muted); }
+.endcard .x { position: absolute; right: 8px; top: 6px; background: none; border: 0; color: var(--muted); font-size: 14px; }
+.orb-sub.bad { color: var(--red); }
+
+/* the scan's way to a solid, stage by stage */
+.hud-stages { position: absolute; left: 40px; top: 46px; display: flex; gap: 0; font: 800 9px/1 var(--display); letter-spacing: 0.14em; }
+.hud-stages span { padding: 4px 8px; background: #000b; color: #f2ede44d; border: 1.5px solid #f2ede41f; margin-right: -1.5px; }
+.hud-stages span.on { color: #000; background: var(--paper); border-color: #000; }
+.hud-stages span.now { background: var(--yellow); animation: nudge 1s ease-in-out infinite; }
+.hud-plan { top: 76px; }
+.hud-quiet { position: absolute; left: 30px; bottom: 112px; background: #000d; border: 1.5px solid var(--yellow); color: var(--yellow); padding: 5px 9px; font: 700 11px/1 var(--mono); letter-spacing: 0.08em; animation: blink 2s steps(2) infinite; }
