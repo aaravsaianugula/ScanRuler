@@ -352,7 +352,9 @@ def enclosing(tris, pts, tid, eps=0.05):
 
 def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000):
     """The organic route's gate: the delivered solid (reduced) is the scan, closed, within the scan's own
-    noise (the scan-mode rule). Distances are measured only where the scan has surface that bounds a
+    noise (the scan-mode rule). The max is judged by area, not by its one worst point: at most a thousandth
+    of the measured surface past the max tolerance, and none of it in a band (a connected region) larger
+    than scan mode's systematic band - a crevice sealed shut or an unscanned mouth is a few mm2. Distances are measured only where the scan has surface that bounds a
     volume: islands the repair removed, holes it filled (no scan under them) and single sheets (flaps,
     stray inner layers) are reported as areas, not counted as error."""
     A, R0, R = read_stl(inp), read_stl(repaired), read_stl(reduced)
@@ -374,7 +376,8 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000):
     pr, tr = pr[k], tr[k]
     scanned = own[tr]
     bounding = enclosing(R0, pr, tr)
-    d_ar, _ = MeshDistance(R, spacing)(pr[scanned & bounding])
+    pa = pr[scanned & bounding]
+    d_ar, sg_ar = MeshDistance(R, spacing)(pa)
     pb = sample(R, spacing)
     pb = pb[cap(len(pb))]
     d_ra, sg = MeshDistance(A, spacing)(pb)
@@ -385,11 +388,19 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000):
     open_e, nonman = edge_counts(R)
     tolr = dict(rms=max(tol, 1.25 * noise + 0.01), p95=2.5 * noise + 0.02, p99=3.5 * noise + 0.03, max=8 * noise + 0.2,
                 vol=None, dim=None, face_p95=None)
+    # each sample stands for its share of its surface: past-max area and bands in mm2
+    per_a, per_b = area(R0) / len(pr), area(R) / len(pb)
+    measured_a, measured_b = len(pa) * per_a, int(supported.sum()) * per_b
+    past = dict(scan=float((d_ar > tolr["max"]).sum() * per_a), solid=float((d_ra[supported] > tolr["max"]).sum() * per_b))
+    min_band = max(2.0, 5e-4 * measured_a)
+    bands = [round(c["points"] * per_a, 2) for c in clusters(pa, d_ar, sg_ar, tolr["max"], spacing, top=10_000)]
+    bands += [round(c["points"] * per_b, 2) for c in clusters(pb[supported], d_ra[supported], sg[supported], tolr["max"], spacing, top=10_000)]
     checks = {
         "closed": open_e == 0 and nonman == 0,
         "rms": max(s_ar["rms"], s_ba["rms"]) <= tolr["rms"],
         "p99": max(s_ar["p99"], s_ba["p99"]) <= tolr["p99"],
-        "max": max(s_ar["max"], s_ba["max"]) <= tolr["max"],
+        "max_area": past["scan"] <= 1e-3 * measured_a and past["solid"] <= 1e-3 * measured_b,
+        "max_bands": max(bands, default=0) < min_band,
     }
     devs = [dict(c, of="model", kind="off the scan") for c in clusters(pb[supported], d_ra[supported], sg[supported], tolr["p99"], spacing)]
     return dict(
@@ -402,6 +413,9 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000):
         filled_area_mm2=round(float((~supported).mean()) * area(R), 1),
         sheet_area_mm2=round(float((scanned & ~bounding).mean()) * area(R0), 1),
         sheet_share=round(float((scanned & ~bounding).sum() / max(1, scanned.sum())), 4),
+        past_max_mm2={k: round(v, 1) for k, v in past.items()},
+        past_max_share=dict(scan=round(past["scan"] / max(measured_a, 1e-9), 5), solid=round(past["solid"] / max(measured_b, 1e-9), 5)),
+        largest_band_mm2=max(bands, default=0.0), min_band_mm2=round(min_band, 1),
     )
 
 
@@ -415,6 +429,9 @@ def summary(r):
             f"noise sigma {r['noise']:.4f}: tolerances rms {r['tolerances']['rms']:.3f} p99 {r['tolerances']['p99']:.3f} max {r['tolerances']['max']:.3f}",
             f"filled holes {r['filled_area_mm2']} mm2, removed islands {r['removed_area_mm2']} mm2, "
             f"single sheets {r['sheet_area_mm2']} mm2 ({100 * r['sheet_share']:.1f} % of the scan: no closed solid lies on them, not measured)",
+            f"past max {r['tolerances']['max']:.3f}: scan {r['past_max_mm2']['scan']} mm2 ({100 * r['past_max_share']['scan']:.3f} %), "
+            f"solid {r['past_max_mm2']['solid']} mm2 ({100 * r['past_max_share']['solid']:.3f} %) of 0.1 % allowed; "
+            f"largest band {r['largest_band_mm2']} mm2 of {r['min_band_mm2']} allowed",
             "failed: " + (", ".join(k for k, v in r["checks"].items() if not v) or "none")])
     f = lambda s: f"rms {s['rms']:.4f} p95 {s['p95']:.4f} p99 {s['p99']:.4f} max {s['max']:.4f}"
     lines = [f"VERDICT {r['verdict']} ({r['mode']}" + (f", noise sigma {r['noise']:.4f}" if r["noise"] else "") + ")",

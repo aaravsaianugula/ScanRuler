@@ -148,7 +148,7 @@ export function Validation({ validations }) {
   const r = v.result
   const t = r.tolerances
   const worst = (k) => Math.max(r.input_to_model[k], r.model_to_input[k])
-  const metrics = [['RMS', worst('rms'), t.rms], ['P95', worst('p95'), t.p95], ['P99', worst('p99'), t.p99], ['MAX', worst('max'), t.max], ...(r.mode === 'organic' ? [] : [['VOL%', Math.abs(r.volume.diff_pct), t.vol]])]
+  const metrics = [['RMS', worst('rms'), t.rms], ['P95', worst('p95'), t.p95], ['P99', worst('p99'), t.p99], ['MAX', worst('max'), r.mode === 'organic' ? null : t.max], ...(r.mode === 'organic' ? [] : [['VOL%', Math.abs(r.volume.diff_pct), t.vol]])]
   const history = validations.map((x) => Math.max(x.result.input_to_model.p95, x.result.model_to_input.p95))
   const pass = r.verdict === 'PASS'
   return (
@@ -159,7 +159,7 @@ export function Validation({ validations }) {
           <span>{pass ? 'PASS' : 'FAIL'}</span><small>{pass ? '承認' : '警告'}</small>
         </div>
         <pre className="meters">
-          {metrics.map(([k, val, tol]) => `${k.padEnd(5)}${bar(val, tol)} ${val.toFixed(3).padStart(7)} ${tol != null ? `/ ${tol.toFixed(3)}` : ''}${tol != null && val > tol ? '  ✗' : '  ✓'}`).join('\n')}
+          {metrics.map(([k, val, tol]) => `${k.padEnd(5)}${bar(val, tol)} ${val.toFixed(3).padStart(7)} ${tol != null ? `/ ${tol.toFixed(3)}` : ''}${tol == null ? '  ·' : val > tol ? '  ✗' : '  ✓'}`).join('\n')}
         </pre>
         <Spark values={history} />
         <ul className="checks">
