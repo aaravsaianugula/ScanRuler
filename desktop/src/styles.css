@@ -169,7 +169,7 @@ button:focus-visible, [role=button]:focus-visible, input:focus-visible, label:fo
 
 /* ---------- run view ---------- */
 .runview { display: grid; grid-template-columns: 1.6fr 1fr; grid-template-rows: 1fr 44px; gap: 16px; padding: 16px 16px 0; min-height: 0; }
-.run-left, .run-right { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+.run-left, .run-right { display: flex; flex-direction: column; gap: 16px; min-height: 0; min-width: 0; }
 .live { flex: 1; min-height: 0; }
 .beam { flex: 1; min-height: 0; display: flex; }
 .live-frame { position: relative; flex: 1; min-height: 0; background: #000; overflow: hidden; }
@@ -294,3 +294,45 @@ button:focus-visible, [role=button]:focus-visible, input:focus-visible, label:fo
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* the viewport: director camera over the live ScanRuler page */
+.view-tabs { display: inline-flex; gap: 4px; margin-left: 6px; }
+.view-tabs button { background: #0006; border: 1.5px solid #0008; color: #f2ede4b3; font: 800 10px/1 var(--display); letter-spacing: 0.16em; padding: 3px 7px; }
+.view-tabs button.on { background: var(--paper); color: #000; border-color: #000; }
+.director-layer { position: absolute; inset: 0; z-index: 1; }
+.director-layer.off { visibility: hidden; pointer-events: none; }
+.director { position: absolute; inset: 0; }
+.director canvas { display: block; width: 100%; height: 100%; }
+.director-wait { position: absolute; inset: 0; display: grid; place-items: center; font: 800 16px/1 var(--display); letter-spacing: 0.3em; color: var(--muted); animation: blink 1.2s steps(2) infinite; }
+.director-layer::before, .director-layer::after { content: ''; position: absolute; left: 0; right: 0; height: 0; background: #000; z-index: 1; transition: height 0.6s cubic-bezier(.6, 0, .2, 1); pointer-events: none; }
+.director-layer::before { top: 0; } .director-layer::after { bottom: 0; }
+.director-layer.letterbox::before, .director-layer.letterbox::after { height: 7%; }
+.dlabels { position: absolute; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; }
+.dlabel { position: absolute; left: 0; top: 0; font: 800 10px/1 var(--display); letter-spacing: 0.14em; padding: 3px 6px; background: #000c; border-left: 3px solid var(--yellow); white-space: nowrap; text-transform: uppercase; }
+.dlabel.cluster { border-color: var(--red); color: #ffb3ad; }
+.hud { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.hud-top { position: absolute; top: 14px; left: 40px; right: 40px; display: flex; gap: 10px; align-items: center; font: 700 11px/1 var(--mono); letter-spacing: 0.08em; }
+.hud-cam { display: flex; gap: 6px; align-items: center; background: #000b; padding: 5px 8px; border: 1.5px solid #f2ede433; }
+.hud-tc { background: #000b; padding: 5px 8px; color: var(--muted); }
+.hud-eta { position: relative; margin-left: auto; background: #000b; padding: 5px 8px 7px; border: 1.5px solid var(--yellow); color: var(--yellow); overflow: hidden; }
+.hud-eta i { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--yellow); transition: width 1s linear; }
+.hud-third { position: absolute; left: 30px; bottom: 34px; max-width: 58%; display: grid; gap: 4px; animation: slam 0.45s cubic-bezier(.2, 1.4, .4, 1); }
+.hud-third b { justify-self: start; color: #000; font: 800 20px/1 var(--display); letter-spacing: 0.12em; padding: 6px 12px 5px; box-shadow: 4px 4px 0 #000; }
+.hud-third span { justify-self: start; background: #000d; padding: 5px 10px; font: 17px/1.1 var(--term); color: var(--paper); border-left: 4px solid var(--tint); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hud-plan { position: absolute; left: 30px; right: 270px; top: 50px; max-width: 640px; background: #000c; padding: 6px 10px; font: 17px/1.15 var(--term); color: #f5c518e6; border-left: 3px solid var(--yellow); animation: pop 0.3s ease-out; }
+.hud-plan small { display: block; font: 800 9px/1 var(--display); letter-spacing: 0.24em; color: var(--muted); margin-bottom: 3px; }
+.hud-scan { position: absolute; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, #0000, var(--blue-hi), #0000); box-shadow: 0 0 14px var(--blue-hi); animation: scanline 2.4s linear infinite; }
+.hud-flash { position: absolute; inset: 0; background: var(--paper); animation: flash 0.35s ease-out forwards; }
+@keyframes scanline { from { top: 0; } to { top: 100%; } }
+@keyframes flash { from { opacity: 0.55; } to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .hud-scan, .hud-flash { display: none; } .hud-third, .hud-plan { animation: none; } }
+
+/* reasoning: every turn, the old ones folded */
+.term-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
+.term-wrap .term { min-width: 0; }
+.turn.folded { margin-bottom: 2px; }
+button.turn-head { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 0; font: inherit; color: var(--blue-hi); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+button.turn-head:hover { color: var(--paper); }
+.turn-peek { color: #8d887f; }
+.to-live { position: absolute; right: 14px; bottom: 10px; background: var(--yellow); color: #000; border: 2px solid #000; box-shadow: 3px 3px 0 #000; font: 800 11px/1 var(--display); letter-spacing: 0.14em; padding: 6px 10px; }
+.head-btn { background: #0003; border: 1.5px solid #0006; color: #000; font: 800 9px/1 var(--display); letter-spacing: 0.14em; padding: 2px 6px; margin-right: 6px; }

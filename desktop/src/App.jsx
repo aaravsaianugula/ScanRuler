@@ -3,6 +3,7 @@ import { ThinkingOrb } from 'thinking-orbs'
 import AsciiHero from './components/AsciiHero.jsx'
 import LiveView from './components/LiveView.jsx'
 import { Bodies, OrbCard, Reasoning, Timeline, Validation } from './components/SwiftPanels.jsx'
+import { estimate, record } from './eta.js'
 import { initial, PHASES, reduce } from './run.js'
 
 // "ANSI Shadow" block letters, joined at run time so every row lines up
@@ -40,6 +41,7 @@ export default function App() {
   const [report, setReport] = useState(null)
   const [card, setCard] = useState(null)
   const elapsed = useElapsed(run)
+  const eta = estimate(run, Date.now() / 1000)
 
   useEffect(() => {
     const offE = window.studio.onEvent((e) => {
@@ -62,9 +64,10 @@ export default function App() {
     return () => clearTimeout(id)
   }, [run.phase, run.phaseLabel])
 
-  // remember finished runs
+  // remember finished runs, and how long their phases took (the ETA learns from them)
   useEffect(() => {
-    if (!run.done) return
+    if (!run.done || run.replay) return
+    record(run, run.done.t || Date.now() / 1000)
     const entry = { stl: run.stl, work: run.done.work, status: run.done.status, step: run.done.step, report: run.done.report, t: Date.now() }
     const list = [entry, ...readRecent().filter((r) => r.work !== entry.work)].slice(0, 8)
     try { localStorage.setItem(RECENT_KEY, JSON.stringify(list)) } catch { /* storage blocked: no history */ }
@@ -78,6 +81,17 @@ export default function App() {
     if (r?.error) dispatch({ type: 'error', text: r.error })
   }, [])
 
+  // a finished run, read back from the events it recorded: its reasoning, actions and checks as they were
+  const replay = async (work) => {
+    const text = await window.studio.readText(`${work}\\events.jsonl`, work)
+    if (!text) { setReport('This run has no recorded events: runs are recorded from this version of the app on.'); return }
+    lastPhase.current = 'replay'
+    dispatch({ type: 'reset', replay: true })
+    for (const line of text.split('\n')) { try { if (line) dispatch(JSON.parse(line)) } catch { /* a torn last line */ } }
+    dispatch({ type: 'exit', code: 0 })
+    setScreen('run')
+  }
+
   const openReport = async (file, work) => setReport(await window.studio.readText(file, work) || 'The report could not be read.')
 
   return (
@@ -85,8 +99,8 @@ export default function App() {
       <div className="crt" aria-hidden />
       <TopBar run={run} screen={screen} onHome={() => setScreen('home')} onSettings={() => setSettingsOpen(true)} />
       {screen === 'home'
-        ? <Home onStart={start} onOpenReport={openReport} running={run.status === 'running'} onResume={() => setScreen('run')} />
-        : <RunView run={run} elapsed={elapsed} onStop={() => window.studio.stop()} onNew={() => setScreen('home')} onReport={() => openReport(run.done.report, run.done.work)} />}
+        ? <Home onStart={start} onOpenReport={openReport} onReplay={replay} running={run.status === 'running'} onResume={() => setScreen('run')} />
+        : <RunView run={run} elapsed={elapsed} eta={eta} onStop={() => window.studio.stop()} onNew={() => setScreen('home')} onReport={() => openReport(run.done.report, run.done.work)} />}
       {card && <TitleCard card={card} />}
       {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
       {report && <ReportModal text={report} onClose={() => setReport(null)} />}
@@ -131,7 +145,7 @@ function Health() {
   )
 }
 
-function Home({ onStart, onOpenReport, running, onResume }) {
+function Home({ onStart, onOpenReport, onReplay, running, onResume }) {
   const [stl, setStl] = useState(null)
   const [mode, setMode] = useState('auto')
   const [swift, setSwift] = useState(true)
@@ -217,6 +231,7 @@ function Home({ onStart, onOpenReport, running, onResume }) {
                 <li key={r.work}>
                   <span className={`dot ${r.status === 'PASS' ? 'ok' : 'no'}`} />
                   <span className="recent-name">{(r.stl || '').split(/[\\/]/).pop()}</span>
+                  <button className="link" onClick={() => onReplay(r.work)}>replay</button>
                   <button className="link" onClick={() => onOpenReport(r.report, r.work)}>report</button>
                   <button className="link" onClick={() => window.studio.show(r.step || r.report)}>folder</button>
                 </li>
@@ -229,16 +244,16 @@ function Home({ onStart, onOpenReport, running, onResume }) {
   )
 }
 
-function RunView({ run, elapsed, onStop, onNew, onReport }) {
+function RunView({ run, elapsed, eta, onStop, onNew, onReport }) {
   const active = run.status === 'running'
   return (
     <main className="runview">
       <div className="run-left">
-        <LiveView url={run.pageUrl} active={active && run.activity !== 'idle'} image={run.image} work={run.work} phaseLabel={run.phaseLabel} />
+        <LiveView run={run} elapsed={elapsed} eta={eta} />
         <Timeline items={run.timeline} />
       </div>
       <div className="run-right">
-        <OrbCard run={run} elapsed={elapsed} />
+        <OrbCard run={run} elapsed={elapsed} eta={eta} />
         <Reasoning turns={run.turns} logs={run.logs} running={active && (run.activity === 'thinking' || run.activity === 'writing')} />
         <Validation validations={run.validations} />
         <Bodies bodies={run.bodies} />

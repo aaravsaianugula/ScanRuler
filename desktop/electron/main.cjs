@@ -111,13 +111,25 @@ function startRun(_e, opts) {
     env: { ...process.env, SWIFT_URL: s.gatewayUrl, SWIFT_MODEL: s.model, PYTHONIOENCODING: 'utf-8' },
     windowsHide: true,
   })
-  run = { child }
+  run = { child, rec: null }
+  const r = run
+  send('run:event', { type: 'meta', tris: Math.max(0, Math.round((fs.statSync(opts.stl).size - 84) / 50)) })
+  // every event also goes to <work>/events.jsonl, so a finished run can be replayed: its reasoning, actions, checks
+  const keep = (e) => {
+    if (e.type === 'start' && e.work && !r.rec) {
+      try { r.rec = fs.createWriteStream(path.join(e.work, 'events.jsonl'), { flags: 'w' }) } catch { /* not recorded */ }
+    }
+    r.rec?.write(JSON.stringify(e) + '\n')
+    send('run:event', e)
+  }
   readline.createInterface({ input: child.stdout }).on('line', (line) => {
-    try { send('run:event', JSON.parse(line)) } catch { send('run:event', { type: 'log', text: line }) }
+    let e
+    try { e = JSON.parse(line) } catch { e = { type: 'log', text: line } }
+    keep(e)
   })
-  readline.createInterface({ input: child.stderr }).on('line', (line) => send('run:event', { type: 'stderr', text: line }))
+  readline.createInterface({ input: child.stderr }).on('line', (line) => keep({ type: 'stderr', text: line }))
   child.on('error', (err) => send('run:event', { type: 'error', text: `Could not start Python: ${err.message}` }))
-  child.on('exit', (code) => { run = null; send('run:exit', { code }) })
+  child.on('exit', (code) => { r.rec?.end(); run = null; send('run:exit', { code }) })
   return { ok: true }
 }
 
@@ -154,6 +166,8 @@ ipcMain.handle('fs:image', (_e, file, work) => {
   if (!insideWork(file, work) || !/\.png$/i.test(file) || !fs.existsSync(file)) return null
   return `data:image/png;base64,${fs.readFileSync(file).toString('base64')}`
 })
+// the run's mesh for the director's own 3D view: STL files only
+ipcMain.handle('fs:mesh', (_e, file) => (typeof file === 'string' && /\.stl$/i.test(file) && fs.existsSync(file) ? fs.readFileSync(file) : null))
 ipcMain.handle('health', async () => {
   const s = loadSettings()
   try {

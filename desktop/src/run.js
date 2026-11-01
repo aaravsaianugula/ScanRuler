@@ -24,6 +24,40 @@ export const initial = {
   bodies: null,            // { bodies: [{ name, volume, triangles, lo, hi }], dropped, cuts, image }: the named solids of the STEP
   logs: [],
   done: null, error: null, startedAt: null, endedAt: null,
+  tris: null,              // triangles in the input (for the ETA)
+  phaseTimes: [],          // [{ id, t }]: when each phase began (run clock, s)
+  turnTimes: [],           // when each Swift turn began
+  focus: null,             // { p: [x, y, z], r, t }: where the last tool call looked, for the director's camera
+  replay: false,           // a finished run read back from its events.jsonl
+}
+
+const vec = (v) => (Array.isArray(v) && v.length === 3 && v.every((x) => typeof x === 'number') ? v : null)
+
+// where a tool call looks: the first box, point or point set in its arguments
+export function focusOf(args) {
+  let found = null
+  const walk = (o, depth) => {
+    if (found || !o || typeof o !== 'object' || depth > 7) return
+    if (Array.isArray(o)) {
+      const pts = o.map(vec)
+      if (pts.length > 1 && pts.every(Boolean)) {
+        const c = [0, 1, 2].map((i) => pts.reduce((a, p) => a + p[i], 0) / pts.length)
+        found = { p: c, r: Math.max(...pts.map((p) => Math.hypot(p[0] - c[0], p[1] - c[1], p[2] - c[2]))) }
+        return
+      }
+      for (const x of o) walk(x, depth + 1)
+      return
+    }
+    const mn = vec(o.min) || vec(o.lo), mx = vec(o.max) || vec(o.hi)
+    if (mn && mx) { found = { p: mn.map((m, i) => (m + mx[i]) / 2), r: Math.hypot(...mx.map((m, i) => m - mn[i])) / 2 }; return }
+    for (const k of ['at', 'center', 'centre', 'centroid', 'point', 'origin', 'near']) {
+      const p = vec(o[k])
+      if (p) { found = { p, r: [o.size / 2, o.radius * 3, o.within].find((x) => x > 0) || null }; return }
+    }
+    for (const v of Object.values(o)) walk(v, depth + 1)
+  }
+  try { walk(JSON.parse(args || '{}'), 0) } catch { /* not JSON: no place */ }
+  return found
 }
 
 const MEASURE = /scan_|element_|section|heightmap|outline|fillet_read|thread_read|draft|qa|nearest|query|describe|view_render|body_compare|body_review/
@@ -48,17 +82,19 @@ const last = (a) => a[a.length - 1]
 export function reduce(s, e) {
   switch (e.type) {
     case 'reset':
-      return { ...initial, status: 'running', stl: e.stl, swift: e.swift, startedAt: Date.now() }
+      return { ...initial, status: 'running', stl: e.stl, swift: e.swift, startedAt: Date.now(), replay: !!e.replay }
     case 'start':
-      return { ...s, status: 'running', stl: s.stl || e.stl, startedAt: s.startedAt || Date.now(), work: e.work, model: e.model, swift: e.swift }
+      return { ...s, status: 'running', stl: s.stl || e.stl, startedAt: s.replay ? e.t * 1000 : s.startedAt || Date.now(), work: e.work, model: e.model, swift: e.swift }
+    case 'meta':
+      return { ...s, tris: e.tris }
     case 'phase':
-      return { ...s, phase: e.phase, phaseLabel: e.label, activity: e.phase === 'open' ? 'linking' : e.phase === 'check' ? 'validating' : e.phase === 'swift' ? 'prefill' : 'working' }
+      return { ...s, phase: e.phase, phaseLabel: e.label, phaseTimes: [...s.phaseTimes, { id: e.phase, t: e.t }], activity: e.phase === 'open' ? 'linking' : e.phase === 'check' ? 'validating' : e.phase === 'swift' ? 'prefill' : 'working' }
     case 'mode':
       return { ...s, mode: e.mode }
     case 'page':
       return { ...s, pageUrl: e.url }
     case 'turn':
-      return { ...s, turn: e.n, maxTurns: e.max, context: e.context, contextLimit: e.limit, activity: 'prefill', turns: [...s.turns, { n: e.n, reasoning: '', content: '', tokens: null }] }
+      return { ...s, turn: e.n, maxTurns: e.max, context: e.context, contextLimit: e.limit, activity: 'prefill', turnTimes: [...s.turnTimes, e.t], turns: [...s.turns, { n: e.n, reasoning: '', content: '', tokens: null }] }
     case 'turn_end': {
       const turns = s.turns.slice()
       if (turns.length) turns[turns.length - 1] = { ...last(turns), tokens: e.completion_tokens, prompt: e.prompt_tokens }
@@ -71,8 +107,10 @@ export function reduce(s, e) {
       turns[turns.length - 1] = { ...t, [e.type]: t[e.type] + e.delta }
       return { ...s, turns, activity: e.type === 'reasoning' ? 'thinking' : 'writing' }
     }
-    case 'tool':
-      return { ...s, activity: activityOf(e.name, e.args), timeline: [...s.timeline, { id: s.timeline.length, name: e.name, args: e.args, result: null, t: e.t }].slice(-300) }
+    case 'tool': {
+      const f = focusOf(e.args)
+      return { ...s, activity: activityOf(e.name, e.args), focus: f ? { ...f, t: e.t } : s.focus, timeline: [...s.timeline, { id: s.timeline.length, name: e.name, args: e.args, result: null, t: e.t }].slice(-300) }
+    }
     case 'tool_result': {
       const timeline = s.timeline.slice()
       for (let i = timeline.length - 1; i >= 0; i--) if (timeline[i].name === e.name && timeline[i].result === null) { timeline[i] = { ...timeline[i], result: e.text }; break }
@@ -88,11 +126,11 @@ export function reduce(s, e) {
     case 'stderr':
       return { ...s, logs: [...s.logs, e.text].slice(-400) }
     case 'done':
-      return { ...s, done: e, status: 'done', activity: 'idle', endedAt: Date.now() }
+      return { ...s, done: e, status: 'done', activity: 'idle', endedAt: s.replay ? e.t * 1000 : Date.now() }
     case 'error':
-      return { ...s, error: e.text, status: 'error', activity: 'idle', endedAt: Date.now() }
+      return { ...s, error: e.text, status: 'error', activity: 'idle', endedAt: s.replay && e.t ? e.t * 1000 : Date.now() }
     case 'exit':
-      return s.status === 'running' ? { ...s, status: e.code === 0 ? 'done' : 'error', error: s.error || (e.code ? `The run stopped (exit ${e.code}).` : null), activity: 'idle', endedAt: Date.now() } : s
+      return s.status === 'running' ? { ...s, status: e.code === 0 ? 'done' : 'error', error: s.error || (e.code ? `The run stopped (exit ${e.code}).` : null), activity: 'idle', endedAt: s.replay ? s.endedAt || Date.now() : Date.now() } : s
     default:
       return s
   }

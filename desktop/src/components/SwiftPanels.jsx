@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { ThinkingOrb } from 'thinking-orbs'
+import { clock } from '../eta.js'
 import { PHASES } from '../run.js'
 
 // orb state, label and Bauhaus colour per activity
@@ -17,7 +18,7 @@ export const ACTIVITY = {
   working: ['working', 'Working', '#f2ede4'],
 }
 
-export function OrbCard({ run, elapsed }) {
+export function OrbCard({ run, elapsed, eta }) {
   const [state, label, color] = ACTIVITY[run.activity] || ACTIVITY.idle
   const ctx = run.contextLimit ? Math.min(1, run.context / run.contextLimit) : 0
   return (
@@ -34,6 +35,7 @@ export function OrbCard({ run, elapsed }) {
             {run.mode && <span className="chip yellow">{{ cad: 'CAD EXACT', organic: 'ORGANIC' }[run.mode] || 'SCAN'}</span>}
             {run.turn != null && <span className="chip">TURN {run.turn + 1}/{run.maxTurns}</span>}
             <span className="chip">{elapsed}</span>
+            {eta && <span className="chip yellow" title={eta.learning ? 'No finished runs yet to learn from: a first guess' : 'From the runs before this one and this run’s pace'}>ETA {clock(eta.left)}</span>}
           </div>
         </div>
       </div>
@@ -60,34 +62,65 @@ function PhaseRail({ phase, done }) {
   )
 }
 
+const firstLine = (t) => (t.content || t.reasoning || '').replace(/\s+/g, ' ').trim().slice(0, 110)
+
+// every turn of the run: the last few open, the earlier ones folded to a line (click to read them); the box
+// follows the newest text until the reader scrolls up, and a button brings it back to live
 export function Reasoning({ turns, running, logs }) {
   const box = useRef(null)
-  const [follow, setFollow] = useState(true)
+  const follow = useRef(true)
+  const [behind, setBehind] = useState(false)
+  const [open, setOpen] = useState(() => new Set())
+  const [all, setAll] = useState(false)
   const lastTurn = turns[turns.length - 1]
   const log = turns.length === 0       // before Swift speaks (or with the autopilot alone) the run's own log
+  const toLive = () => { follow.current = true; setBehind(false); if (box.current) box.current.scrollTop = box.current.scrollHeight }
   useEffect(() => {
-    if (follow && box.current) box.current.scrollTop = box.current.scrollHeight
-  }, [lastTurn?.reasoning, lastTurn?.content, turns.length, logs.length, follow])
+    if (follow.current && box.current) box.current.scrollTop = box.current.scrollHeight
+  }, [lastTurn?.reasoning, lastTurn?.content, turns.length, logs.length])
+  const onScroll = (e) => {
+    const el = e.currentTarget
+    const atEnd = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+    follow.current = atEnd
+    setBehind(!atEnd)
+  }
+  const toggle = (n) => setOpen((s) => { const x = new Set(s); x.has(n) ? x.delete(n) : x.add(n); return x })
   return (
     <section className="panel reasoning">
-      <header className="panel-head yellow"><span className="glyph">▲</span> {log ? 'RUN // LOG' : 'SWIFT // REASONING'}<span className="head-right">{log ? `${logs.length} lines` : `${turns.length} turns`}</span></header>
-      <div className="term" ref={box} onScroll={(e) => { const el = e.currentTarget; setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 40) }}>
-        {log && logs.length === 0 && <p className="term-dim">{'> waiting…'}</p>}
-        {log && <pre className="log">{logs.slice(-250).join('\n')}</pre>}
-        {turns.slice(-12).map((t, i, arr) => (
-          <div key={t.n} className="turn">
-            <div className="turn-head">┌─ TURN {String(t.n + 1).padStart(2, '0')} {t.tokens ? `· ${t.tokens} tok` : ''}</div>
-            {t.reasoning && <p className="think">{t.reasoning}</p>}
-            {t.content && <p className="say">{t.content}</p>}
-            {running && i === arr.length - 1 && <span className="cursor">█</span>}
-          </div>
-        ))}
+      <header className="panel-head yellow">
+        <span className="glyph">▲</span> {log ? 'RUN // LOG' : 'SWIFT // REASONING'}
+        <span className="head-right">
+          {!log && turns.length > 3 && <button className="head-btn" onClick={() => setAll((a) => !a)}>{all ? 'FOLD' : 'OPEN ALL'}</button>}
+          {log ? `${logs.length} lines` : `${turns.length} turns`}
+        </span>
+      </header>
+      <div className="term-wrap">
+        <div className="term" ref={box} onScroll={onScroll}>
+          {log && logs.length === 0 && <p className="term-dim">{'> waiting…'}</p>}
+          {log && <pre className="log">{logs.slice(-400).join('\n')}</pre>}
+          {turns.map((t, i) => {
+            const recent = i >= turns.length - 3
+            const shown = all || recent || open.has(t.n)
+            const head = `TURN ${String(t.n + 1).padStart(2, '0')}${t.tokens ? ` · ${t.tokens} tok` : ''}`
+            return (
+              <div key={t.n} className={`turn ${shown ? '' : 'folded'}`}>
+                {recent && !all
+                  ? <div className="turn-head">┌─ {head}</div>
+                  : <button className="turn-head" onClick={() => toggle(t.n)} aria-expanded={shown}>{shown ? '▾' : '▸'} {head}{!shown && <span className="turn-peek"> {firstLine(t)}</span>}</button>}
+                {shown && t.reasoning && <p className="think">{t.reasoning}</p>}
+                {shown && t.content && <p className="say">{t.content}</p>}
+                {running && i === turns.length - 1 && <span className="cursor">█</span>}
+              </div>
+            )
+          })}
+        </div>
+        {behind && <button className="to-live" onClick={toLive}>▼ LIVE</button>}
       </div>
     </section>
   )
 }
 
-function summarize(name, args) {
+export function summarize(name, args) {
   try {
     const a = JSON.parse(args || '{}')
     if (name === 'scanruler') return (a.calls || []).map((c) => c.tool).join(' → ')

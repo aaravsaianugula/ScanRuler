@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('studio', {
   open: (file) => ipcRenderer.invoke('shell:open', file),
   readText: (file, work) => ipcRenderer.invoke('fs:text', file, work),
   readImage: (file, work) => ipcRenderer.invoke('fs:image', file, work),
+  readMesh: (file) => ipcRenderer.invoke('fs:mesh', file),
   settings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (s) => ipcRenderer.invoke('settings:set', s),
   health: () => ipcRenderer.invoke('health'),
