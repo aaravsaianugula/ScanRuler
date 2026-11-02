@@ -69,6 +69,8 @@ def surface_shares(stl, samples=40000, candidates=1500, deg=8):
     return float(planes), float((np.abs(c @ s.T) < np.sin(np.radians(deg))).mean(1).max()), flat
 
 
+BAMBU_FACES = 5000      # a STEP Bambu Studio opens in about a minute
+
 ORGANIC_REPORT = ("Organic route: islands removed and holes filled in ScanRuler, closed into a manifold solid (winding number + "
                   "marching cubes, sealed crevices kept as cavities), decimated keeping it closed (MeshLab), written as a faceted STEP solid.")
 
@@ -236,13 +238,16 @@ def main():
                 log("[run] the import check failed:\n" + traceback.format_exc())
             log(f"[run] STEP import check: {imported}")
         mf = step.with_suffix(".3mf")
-        slicer = step if imported and imported["ok"] else mf if mf.exists() else None
+        # Bambu Studio 2.x (OCCT 7.6) takes ~35 s + 5 ms a face (measured: 20k faces 131 s, 40k 227 s): a faceted
+        # figurine goes to the slicer as its 3MF, the same closed solid; a CAD STEP of a few hundred faces as itself
+        slicer = step if imported and imported["ok"] and imported.get("faces", 0) <= BAMBU_FACES else mf if mf.exists() else None
         md = [f"# {stl.stem}: reverse-engineering report", "",
               f"**{status}**: {step.name} (mode {mode}, {time.time() - t0:.0f} s)"
               + (f"; for a slicer, the same triangles: {mf.name}" if mf.exists() else ""), "",
               "## Validation (independent, against the original mesh)", "```", summary(r) if r else "no model was checked", "```", "",
               "## STEP opened as Bambu Studio opens it", (f"{'OK' if imported['ok'] else 'PROBLEMS'}: {imported['solids']} solids, "
-              f"{imported.get('faces', 0)} faces, {imported['seconds']} s" + "".join(f"\n- {p}" for p in imported["problems"])) if imported
+              f"{imported.get('faces', 0)} faces, {imported['seconds']} s here, Bambu Studio about "
+              f"{35 + 0.005 * imported.get('faces', 0):.0f} s" + ("" if imported.get("faces", 0) <= BAMBU_FACES else f" (too slow: the slicer gets {mf.name})") + "".join(f"\n- {p}" for p in imported["problems"])) if imported
               else "not checked (no OCCT in this Python)", "",
               "## How it was built", report or "(no report)"]
         if organic and getattr(wb, "bodies", None):
