@@ -264,6 +264,8 @@ function RunView({ run, elapsed, eta, onStop, onNew, onReport }) {
         {run.status === 'done' && run.done && (
           <>
             <span className={`verdict ${run.done.status === 'PASS' ? 'ok' : 'no'}`}>{run.done.status === 'PASS' ? '✓ VALIDATED' : '✗ NOT VALIDATED'}</span>
+            {/* the slicer's copy: the same triangles and bodies in a few MB, where a faceted STEP takes a slicer minutes */}
+            {run.done.print && <button title="Opens the 3MF in your slicer (Bambu Studio, PrusaSlicer...)" onClick={() => window.studio.open(run.done.print)}>OPEN IN SLICER</button>}
             {run.done.step && <button onClick={() => window.studio.open(run.done.step)}>OPEN STEP</button>}
             <button onClick={() => window.studio.show(run.done.step || run.done.report)}>SHOW FOLDER</button>
             <button onClick={onReport}>REPORT</button>

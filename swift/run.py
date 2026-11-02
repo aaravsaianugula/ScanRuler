@@ -236,6 +236,7 @@ def main():
         report_path.write_text("\n".join(md), encoding="utf-8")
         log(f"[run] {status} -> {work}")
         emit("done", status=status, work=str(work), step=str(step) if step.exists() else None,
+             print=str(step.with_suffix(".3mf")) if step.with_suffix(".3mf").exists() else None,
              report=str(report_path), seconds=round(time.time() - t0), validation=r)
         return 0 if status == "PASS" else 1
     except Exception as e:

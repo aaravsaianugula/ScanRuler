@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Binary/ASCII STL read, binary STL and 3MF write, numpy only."""
 import struct
+from pathlib import Path
 
 import numpy as np
 
@@ -30,25 +31,32 @@ def write_stl(path, tris):
 
 
 def write_3mf(path, bodies):
-    """bodies: [(name, triangles)] as a 3MF in millimetres, an object per body, its triangles as they are
-    (vertices shared at 1e-6 mm, as the STEP writer shares them). The print copy of the faceted STEP: the
+    """bodies: [(name, triangles or (vertices, faces))] as a 3MF in millimetres, one object with a part per body.
+    Triangles are welded at 1e-6 mm; (vertices, faces) stay as given, so shells touching at an edge stay apart
+    (welded, they would share it four ways: non-manifold to a slicer). The print copy of the faceted STEP: the
     same surface at a few percent of the size, which slicers open directly."""
     import zipfile
     from xml.sax.saxutils import quoteattr
     f6 = lambda x: f"{x:.6f}".rstrip("0").rstrip(".")
     objs, items = [], []
-    for i, (name, tris) in enumerate(bodies, 1):
-        v, inv = np.unique(np.round(np.asarray(tris, float).reshape(-1, 3), 6), axis=0, return_inverse=True)
-        f = inv.reshape(-1, 3)
+    for i, (name, mesh) in enumerate(bodies, 1):
+        if isinstance(mesh, tuple):     # (vertices, faces) as bodies._mesh made them: its shells stay apart, never welded
+            v, f = np.asarray(mesh[0], float), np.asarray(mesh[1], np.int64)
+        else:
+            v, inv = np.unique(np.round(np.asarray(mesh, float).reshape(-1, 3), 6), axis=0, return_inverse=True)
+            f = inv.reshape(-1, 3)
         f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]
         vs = "".join(f'<vertex x="{f6(a)}" y="{f6(b)}" z="{f6(c)}"/>' for a, b, c in v)
         ts = "".join(f'<triangle v1="{a}" v2="{b}" v3="{c}"/>' for a, b, c in f)
         objs.append(f'<object id="{i}" name={quoteattr(str(name))} type="model"><mesh><vertices>{vs}</vertices>'
                     f'<triangles>{ts}</triangles></mesh></object>')
-        items.append(f'<item objectid="{i}"/>')
+        items.append(f'<component objectid="{i}"/>')
+    # one object of parts: a slicer (Bambu Studio, PrusaSlicer) puts it on the plate assembled, as scanned
+    top = len(objs) + 1
+    objs.append(f'<object id="{top}" name={quoteattr(Path(path).stem)} type="model"><components>{"".join(items)}</components></object>')
     model = ('<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" '
              'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">'
-             f'<resources>{"".join(objs)}</resources><build>{"".join(items)}</build></model>')
+             f'<resources>{"".join(objs)}</resources><build><item objectid="{top}"/></build></model>')
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
                    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'

@@ -294,6 +294,7 @@ class Workbench:
 
     def _bodies(self, bodies, dropped, cuts):
         from bodies import _volume
+        indexed_bodies = bodies
         bodies = [(n, b[0][b[1]] if isinstance(b, tuple) else b) for n, b in bodies]
         self.bodies = [dict(name=n, volume=round(abs(_volume(t)), 1), triangles=len(t), lo=t.reshape(-1, 3).min(0).round(1).tolist(),
                             hi=t.reshape(-1, 3).max(0).round(1).tolist()) for n, t in bodies]
@@ -305,7 +306,7 @@ class Workbench:
         notes = [(n, b.reshape(-1, 3)[np.linalg.norm(b.reshape(-1, 3) - b.reshape(-1, 3).mean(0), axis=1).argmin()].tolist()) for n, b in bodies]
         draw(t, lab, notes, png, "bodies as written to the STEP")
         from meshio_min import write_3mf
-        write_3mf(self.organic_step.with_suffix(".3mf"), bodies)      # the same bodies for a slicer, a few MB
+        write_3mf(self.organic_step.with_suffix(".3mf"), indexed_bodies)      # the same bodies for a slicer, a few MB
         self.emit("bodies", bodies=self.bodies, dropped=dropped, cuts=cuts, image=str(png))
 
     def body_pieces(self):
