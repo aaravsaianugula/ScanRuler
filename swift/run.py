@@ -150,6 +150,7 @@ def main():
         emit("mode", mode=mode)
         log(f"[run] mode: {mode}")
         report, failed, agent = "", True, None
+        paged, tried_organic = a.live, False
 
         if mode == "cad":
             phase("autopilot", "Exact reading: slabs, holes, blends")
@@ -173,15 +174,16 @@ def main():
                 wb.close()
                 wb = Workbench(stl, work, page=True, show_browser=not a.headless_browser)
             wb.emit, wb.narrate = emit, True
-            failed = organic_autopilot(wb, phase, log, emit)
+            failed, tried_organic = organic_autopilot(wb, phase, log, emit), True
             report = ORGANIC_REPORT
         elif a.no_swift:
-            report = "A real scan needs Swift: the exact-reading pass works on CAD-exported meshes only."
+            report = "Without Swift, a scan is not read into features: the exact-reading pass works on CAD-exported meshes only."
             log(f"[run] {report}")
         else:
             if not a.live:          # the headless engine cannot fit scans: reopen as the page
                 wb.close()
                 wb = Workbench(stl, work, page=True, show_browser=not a.headless_browser)
+                paged = True
             wb.emit, wb.narrate = emit, False
             phase("swift", "Swift is reverse-engineering the scan")
             agent = Agent(wb, "scan", log=log, max_turns=a.max_turns, emit=emit)
@@ -194,16 +196,25 @@ def main():
                        f"{flat['point']} ({flat['share']:.0%} of the surface): that normal is the up/down axis, and that is where to start.")
             report, failed = agent.run(msg)
             failed = failed or not agent.passed
-            if failed and organic:
-                # a run ends NOT VALIDATED only when Swift and the autopilot both fail
-                log("[run] Swift ended without a pass: delivering the autopilot's organic solid")
+
+        # a run ends NOT VALIDATED only when every route failed: the organic autopilot closes any scan or mesh into a solid
+        if failed and not tried_organic:
+            log("[run] no pass yet: delivering the autopilot's organic solid")
+            try:
+                if not paged:
+                    wb.close()
+                    wb = Workbench(stl, work, page=True, show_browser=not a.headless_browser)
+                wb.emit, wb.narrate = emit, True
                 if not organic_autopilot(wb, phase, log, emit):
-                    failed, report = False, (report or "") + "\n\nSwift ended without a pass; delivered instead: " + ORGANIC_REPORT
+                    failed, report = False, (report + "\n\n" if report else "") + "No feature pass; delivered instead: " + ORGANIC_REPORT
+            except Exception:   # the safety net never costs the run what it already has
+                log("[run] the organic fallback failed:\n" + traceback.format_exc())
 
         r = wb.last_validation
         organic = bool(r and r.get("mode") == "organic")
-        if organic:
+        if organic and mode != "organic":       # delivered by the organic fallback
             mode = "organic"
+            emit("mode", mode=mode)
         phase("deliver", "Writing the STEP and the report")
         if not failed and r and r["verdict"] == "PASS" and organic:
             status, step = "PASS", wb.organic_step

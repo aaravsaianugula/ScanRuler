@@ -90,7 +90,9 @@ export default function LiveView({ run, elapsed, eta }) {
   useEffect(() => { if (shot.n > 1) setFlash((n) => n + 1) }, [shot.n])
 
   const [, label, color] = ACTIVITY[run.activity] || ACTIVITY.idle
-  const lastTool = run.timeline.findLast((x) => x.result === null) || run.timeline[run.timeline.length - 1]
+  // the tool at work, or the last one if it belongs to this phase: a finished call from an earlier phase is not news
+  const sincePhase = run.phaseTimes[run.phaseTimes.length - 1]?.t || 0
+  const lastTool = run.timeline.findLast((x) => x.result === null) || run.timeline.filter((x) => x.t >= sincePhase).pop()
   const what = lastTool && summarize(lastTool.name, lastTool.args)
   const detail = lastTool ? `${lastTool.name}${what ? ` · ${what}` : ''}` : phaseLabel
   const plan = planOf(run.turns)

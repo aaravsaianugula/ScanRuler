@@ -104,7 +104,7 @@ function step(s, e) {
     case 'stage':
       return { ...s, stages: [...s.stages.filter((x) => x.kind !== e.kind), { kind: e.kind, file: e.file, bytes: e.bytes, t: e.t }] }
     case 'reset':
-      return { ...initial, status: 'running', stl: e.stl, swift: e.swift, startedAt: Date.now(), replay: !!e.replay }
+      return { ...initial, status: 'running', stl: e.stl, swift: e.swift, startedAt: e.startedAt || Date.now(), replay: !!e.replay }
     case 'start':
       return { ...s, status: 'running', stl: s.stl || e.stl, startedAt: s.replay ? e.t * 1000 : s.startedAt || Date.now(), work: e.work, model: e.model, swift: e.swift }
     case 'meta':

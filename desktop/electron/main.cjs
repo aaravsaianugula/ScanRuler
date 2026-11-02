@@ -58,6 +58,17 @@ function createWindow() {
   })
   win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
   debugHooks()
+  // a crashed or reloaded window comes back with the run going on in it: everything the run said so far is sent again
+  let crashes = 0
+  win.webContents.on('render-process-gone', (_e, d) => {
+    console.error('window renderer gone:', d.reason)
+    if (d.reason !== 'clean-exit' && ++crashes <= 3) setTimeout(() => !win.isDestroyed() && win.reload(), 1000)
+  })
+  win.webContents.on('did-finish-load', () => {
+    if (!run?.said.length) return
+    send('run:event', { type: 'reset', stl: run.stl, swift: run.swift, startedAt: run.startedAt })
+    for (const e of run.said) send('run:event', e)
+  })
   // links never open inside the app
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//.test(url)) shell.openExternal(url)
@@ -68,7 +79,8 @@ function createWindow() {
 // opt-in, for checking the app without hands: STUDIO_AUTORUN=<stl> [STUDIO_AUTORUN_SWIFT=0] [STUDIO_AUTORUN_MODE=organic] starts a
 // run once the window is up; STUDIO_SHOTS=<dir> saves a screenshot of the window every 15 s
 function debugHooks() {
-  const { STUDIO_AUTORUN: stl, STUDIO_SHOTS: dir } = process.env
+  const { STUDIO_AUTORUN: stl, STUDIO_SHOTS: dir, STUDIO_CRASH_AFTER: crash } = process.env
+  if (crash) setTimeout(() => win.webContents.forcefullyCrashRenderer(), Number(crash) * 1000)   // checks the window's recovery
   if (stl) win.webContents.once('did-finish-load', () => setTimeout(() => startRun(null, { stl, mode: process.env.STUDIO_AUTORUN_MODE || 'auto', swift: process.env.STUDIO_AUTORUN_SWIFT !== '0' }), 2500))
   if (dir) {
     fs.mkdirSync(dir, { recursive: true })
@@ -95,7 +107,17 @@ app.on('web-contents-created', (_e, contents) => {
     prefs.nodeIntegration = false
     prefs.contextIsolation = true
   })
+  // the live ScanRuler page may crash (WebGL, memory): it reloads, the run goes on
+  if (contents.getType() === 'webview') {
+    let crashes = 0
+    contents.on('render-process-gone', (_e, d) => {
+      if (d.reason !== 'clean-exit' && ++crashes <= 3) setTimeout(() => !contents.isDestroyed() && contents.reload(), 1500)
+    })
+  }
 })
+
+// a slip in the shell is logged, never a crash dialog that takes the run with it
+process.on('uncaughtException', (err) => { console.error('main:', err); send('run:event', { type: 'stderr', text: `[studio] ${err.message}` }) })
 
 function startRun(_e, opts) {
   if (run) return { error: 'A run is already going.' }
@@ -106,31 +128,50 @@ function startRun(_e, opts) {
   const args = ['-u', script, opts.stl, '--events', '--live', '--max-turns', String(opts.maxTurns || s.maxTurns)]
   if (opts.mode && opts.mode !== 'auto') args.push('--mode', opts.mode)
   if (!opts.swift) args.push('--no-swift')
-  const child = spawn(s.python, args, {
-    cwd: s.repoDir,
-    env: { ...process.env, SWIFT_URL: s.gatewayUrl, SWIFT_MODEL: s.model, PYTHONIOENCODING: 'utf-8' },
-    windowsHide: true,
-  })
-  run = { child, rec: null }
+  let child
+  try {
+    child = spawn(s.python, args, {
+      cwd: s.repoDir,
+      env: { ...process.env, SWIFT_URL: s.gatewayUrl, SWIFT_MODEL: s.model, PYTHONIOENCODING: 'utf-8' },
+      windowsHide: true,
+    })
+  } catch (err) { return { error: `Could not start Python (${s.python}): ${err.message}` } }
+  run = { child, rec: null, said: [], stl: opts.stl, swift: opts.swift, ended: false, startedAt: Date.now() }
   const r = run
-  send('run:event', { type: 'meta', tris: Math.max(0, Math.round((fs.statSync(opts.stl).size - 84) / 50)) })
   // every event also goes to <work>/events.jsonl, so a finished run can be replayed: its reasoning, actions, checks
   const keep = (e) => {
+    if (r.ended) return
     if (e.type === 'start' && e.work && !r.rec) {
-      try { r.rec = fs.createWriteStream(path.join(e.work, 'events.jsonl'), { flags: 'w' }) } catch { /* not recorded */ }
+      try {
+        r.rec = fs.createWriteStream(path.join(e.work, 'events.jsonl'), { flags: 'w' })
+        r.rec.on('error', () => { r.rec = null })   // a full or locked disk costs the recording, not the run
+      } catch { /* not recorded */ }
       r.watch = watchStages(e.work, path.parse(e.stl || opts.stl).name, keep)
     }
+    r.said.push(e)
     r.rec?.write(JSON.stringify(e) + '\n')
     send('run:event', e)
   }
+  let tris = null
+  try { tris = Math.max(0, Math.round((fs.statSync(opts.stl).size - 84) / 50)) } catch { /* no ETA hint */ }
+  keep({ type: 'meta', tris })
   readline.createInterface({ input: child.stdout }).on('line', (line) => {
     let e
     try { e = JSON.parse(line) } catch { e = { type: 'log', text: line } }
+    if (!e || typeof e !== 'object' || typeof e.type !== 'string') e = { type: 'log', text: line }
     keep(e)
   })
   readline.createInterface({ input: child.stderr }).on('line', (line) => keep({ type: 'stderr', text: line }))
-  child.on('error', (err) => send('run:event', { type: 'error', text: `Could not start Python: ${err.message}` }))
-  child.on('exit', (code) => { r.watch?.(); r.rec?.end(); run = null; send('run:exit', { code }) })
+  // the run ends once: after its output is all read ('close'), or when Python never started ('error' without 'close')
+  const end = (code) => {
+    if (r.ended) return
+    r.watch?.(); r.rec?.end()
+    r.ended = true
+    if (run === r) run = null
+    send('run:exit', { code })
+  }
+  child.on('error', (err) => { keep({ type: 'error', text: `Could not start Python (${s.python}): ${err.message}` }); setTimeout(() => end(-1), 500) })
+  child.on('close', (code) => end(code ?? -1))
   return { ok: true }
 }
 

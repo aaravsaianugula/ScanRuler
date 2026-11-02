@@ -3,6 +3,8 @@
 close, sheets crossing at non-manifold edges): inside is where the scan's generalized winding number
 is over 1/2, the surface is the exact distance to the scan, marching cubes on a grid of step h.
 Needs libigl and pymeshlab (pip install libigl pymeshlab)."""
+import sys
+
 import igl
 import numpy as np
 from scipy.sparse import coo_matrix
@@ -137,7 +139,7 @@ def reduce_mesh(tris, faces, passes=12, safe=True):
     if safe and len(tris) > 6 * faces:      # in stages: what is kept out of the last one is then 3x coarser than the closing's cells
         tris = reduce_mesh(tris, 3 * faces, passes)
     v, f = indexed(tris)
-    keep, tree = np.zeros(len(v), bool), cKDTree(v)
+    keep, tree, best = np.zeros(len(v), bool), cKDTree(v), None
     tries = np.zeros(len(v), int)          # how often a spot came back: its keep widens only there
     signed = lambda t: np.einsum("ij,ij->i", t[:, 0], np.cross(t[:, 1], t[:, 2])).sum()
     cavities = [(p.reshape(-1, 3).min(0), p.reshape(-1, 3).max(0)) for p in pieces(tris) if signed(p) < 0]
@@ -157,6 +159,8 @@ def reduce_mesh(tris, faces, passes=12, safe=True):
         bad += [p for p in pieces(out) if signed(p) < 0 and not any(((p.mean((0, 1)) >= lo) & (p.mean((0, 1)) <= hi)).all() for lo, hi in cavities)]
         if not bad:
             return out
+        if best is None or len(bad) < best[0]:
+            best = (len(bad), out)
         before = tries.copy()
         for t in bad:      # a face, or a whole shell; twice as wide where it comes back: at worst all is kept, and the dense mesh is clean
             p = t.reshape(-1, 3)
@@ -165,4 +169,6 @@ def reduce_mesh(tris, faces, passes=12, safe=True):
             ball = tree.query_ball_point(p.mean(0), max(min(3.0, r) * 2 ** n, np.ptp(p, axis=0).max()))
             keep[ball] = True
             tries[ball] = np.maximum(tries[ball], n + 1)
-    raise RuntimeError(f"reduce_mesh: {len(bad)} faces or shells still cut through or turned after {passes} passes")
+    # a few spots left beat no solid: the cleanest pass is delivered and the validator judges it
+    print(f"[organic] reduce_mesh: {best[0]} faces or shells still cut through or turned after {passes} passes; delivering the cleanest pass", file=sys.stderr)
+    return best[1]

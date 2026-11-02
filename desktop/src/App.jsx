@@ -77,7 +77,8 @@ export default function App() {
     lastPhase.current = null
     dispatch({ type: 'reset', stl: opts.stl, swift: opts.swift })
     setScreen('run')
-    const r = await window.studio.start(opts)
+    let r
+    try { r = await window.studio.start(opts) } catch (err) { r = { error: `The run could not start: ${err.message}` } }
     if (r?.error) dispatch({ type: 'error', text: r.error })
   }, [])
 
