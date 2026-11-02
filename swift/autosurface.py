@@ -22,7 +22,7 @@ import igl
 import numpy as np
 from scipy.interpolate import BSpline
 from scipy.sparse import csr_matrix, diags
-from scipy.sparse.csgraph import connected_components, dijkstra
+from scipy.sparse.csgraph import dijkstra
 from scipy.sparse.linalg import spsolve
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -222,10 +222,12 @@ def resample(P, t):
     return np.stack([np.interp(t, s, P[:, k]) for k in range(3)], 1)
 
 
-def surface(V, F, patches=3000, n=6, bend=10.0, tol=0.08, rounds=4, lam=1e-3, max_turn=60, fine=0, log=print):
+def surface(V, F, patches=3000, n=6, bend=10.0, tol=0.08, rounds=6, lam=1e-3, fine=0, log=print):
     """Patches over the closed, outward mesh (V, F). Returns dict(vertices, edges, faces, ...) for
     write_step: vertices (k,3); edges [(v0, v1, cps (n,3))]; faces [(cps (n,n,3), [(edge, forward) x4])]."""
     V, F = np.asarray(V, float), np.asarray(F, np.int64)
+    # closed pieces: solids and the sealed cavities (voids) inside them, every piece turned to face out of itself
+    F, comp, _, solids, voids, _ = solid_pieces(V, F)
     area = igl.doublearea(V, F).sum() / 2
     want = max(int(patches / 6), 4)
     seeds = farthest(face_graph(V, F, bend)[0], want, [])
@@ -249,8 +251,8 @@ def surface(V, F, patches=3000, n=6, bend=10.0, tol=0.08, rounds=4, lam=1e-3, ma
     S, T = S.ravel(), T.ravel()
     for rnd in range(rounds + 1):
         for tries in range(100):                # grow until every cell is a disk with >= 2 corners
-            if tries < 2:
-                seeds = list(dict.fromkeys(centred(G, TT, grow(G, seeds)[0], seeds)))
+            if rnd == 0 and tries < 2:          # centred once: later rounds only add seeds, so cells
+                seeds = list(dict.fromkeys(centred(G, TT, grow(G, seeds)[0], seeds)))   # away from a miss stay
             lab, dist = grow(G, seeds, TT)
             cl, bad, few = cells(F, TT, lab, len(V))
             if not bad:
@@ -267,25 +269,21 @@ def surface(V, F, patches=3000, n=6, bend=10.0, tol=0.08, rounds=4, lam=1e-3, ma
         else:
             raise RuntimeError(f"no disk layout after 100 tries ({len(bad)} cells not disks)")
         out = build(V, F, lab, cl, n, m, t_curve, cR1, cR2, (sR1, sR2), stiff, rim, sfree, As, S, T)
-        err = deviation(V, F, lab, out)
-        # a cell that turns too far (around a plate's rim, a strand's tip) gets a seed past the turn as well
-        nrm = igl.per_face_normals(V, F, np.array([0.0, 0, 1]))
-        turn = np.einsum("ij,ij->i", nrm, nrm[np.asarray(seeds)[lab]])
-        o = np.lexsort((turn, lab))
-        first = o[np.r_[0, np.flatnonzero(np.diff(lab[o])) + 1]]
-        steep = first[turn[first] < np.cos(np.radians(max_turn))]
+        err, where = deviation(V, F, lab, out)
         worst = np.flatnonzero(err > tol)
-        seeds += [int(x) for x in steep]
         log(f"round {rnd}: {len(cl)} cells, {len(out['faces'])} patches, fit max {err.max():.3f} mm, "
-            f"p95 {np.percentile(err, 95):.3f}, cells over {tol}: {len(worst)}, turning over {max_turn} deg: {len(steep)}")
-        if not (len(worst) or len(steep)) or rnd == rounds:
+            f"p95 {np.percentile(err, 95):.3f}, cells over {tol}: {len(worst)}")
+        if not len(worst) or rnd == rounds:
             break
-        for c in worst:                         # another seed where the cell's patches miss
+        cen = V[F].mean(1)
+        for c in worst:                         # another seed at the cell's face nearest to where it misses
             fc = np.flatnonzero(lab == c)
-            seeds.append(int(fc[np.argmax(dist[fc])]))
+            near = int(fc[np.argmin(((cen[fc] - where[c]) ** 2).sum(1))])
+            seeds.append(near if near != seeds[c] else int(fc[np.argmax(dist[fc])]))
         seeds = list(dict.fromkeys(seeds))
-    piece = connected_components(G, directed=False)[1]
-    out.update(cells=len(cl), area=area, shell=piece[np.asarray(seeds)[[f[2] for f in out["faces"]]]])
+    piece = comp[np.asarray(seeds)[[f[2] for f in out["faces"]]] // 4 ** fine]
+    out.update(cells=len(cl), area=area, shell=piece, solids=[int(c) for c in solids],
+               voids={int(k): [int(c) for c in cs] for k, cs in voids.items()})
     return out
 
 
@@ -297,19 +295,26 @@ def grids(sf, g=10):
     pts = np.einsum("ai,bj,pijk->pabk", B, B, Gs).reshape(len(Gs), g * g, 3)
     i, j = np.meshgrid(np.arange(g - 1), np.arange(g - 1), indexing="ij")
     a = (i * g + j).ravel()
-    quad = np.concatenate([np.stack([a, a + g, a + g + 1], 1), np.stack([a, a + g + 1, a + 1], 1)])
+    # every cell split from its (0,0) corner, except the two that hold patch corners (0,1) and (1,0): split
+    # there it would cut the corner, and at a straight one (a lens's side midpoint) the neighbour cuts the same
+    other = ((i == 0) & (j == g - 2) | (i == g - 2) & (j == 0)).ravel()
+    one = np.where(other[:, None], np.stack([a, a + g, a + 1], 1), np.stack([a, a + g, a + g + 1], 1))
+    two = np.where(other[:, None], np.stack([a + g, a + g + 1, a + 1], 1), np.stack([a, a + g + 1, a + 1], 1))
+    quad = np.concatenate([one, two])
     tri = (quad[None] + (np.arange(len(Gs)) * g * g)[:, None, None]).reshape(-1, 3)
     return pts, tri
 
 
 def tessellate(sf, g=12):
-    """The patches as one welded triangle mesh per closed piece, [(vertices, faces)]: neighbours share their
-    edge curves exactly, so their grid points on a shared edge coincide and the weld closes the shell."""
+    """The patches as one welded triangle mesh per solid (its cavities' shells turned inward),
+    [(vertices, faces)]: neighbours share their edge curves exactly, so their grid points on a shared edge
+    coincide and the weld closes the shell."""
     pts, tri = grids(sf, g)
     shell = np.repeat(np.asarray(sf["shell"]), 2 * (g - 1) ** 2)
     out = []
-    for sh in np.unique(shell):
-        t = pts.reshape(-1, 3)[tri[shell == sh]]
+    for s in sf["solids"]:
+        t = np.concatenate([pts.reshape(-1, 3)[tri[shell == s]]] +
+                           [pts.reshape(-1, 3)[tri[shell == c][:, ::-1]] for c in sf["voids"].get(s, [])])
         v, inv = np.unique(np.round(t.reshape(-1, 3), 6), axis=0, return_inverse=True)
         f = inv.reshape(-1, 3)
         out.append((v, f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]))
@@ -317,17 +322,26 @@ def tessellate(sf, g=12):
 
 
 def deviation(V, F, lab, sf):
-    """Per cell, the farthest its patches lie from the mesh, or the mesh from its patches (mm)."""
+    """Per cell, the farthest its patches lie from the mesh or the mesh from its patches (mm), and where:
+    the point (on the patch or the mesh) at that distance."""
     pts, tri = grids(sf)
     cell = np.array([f[2] for f in sf["faces"]])
-    d_out = np.sqrt(igl.point_mesh_squared_distance(pts.reshape(-1, 3), V, F)[0]).reshape(len(pts), -1).max(1)
-    err = np.zeros(lab.max() + 1)
-    np.maximum.at(err, cell, d_out)
+    nc = lab.max() + 1
+    d_out = np.sqrt(igl.point_mesh_squared_distance(pts.reshape(-1, 3), V, F)[0]).reshape(len(pts), -1)
+    err, where = np.zeros(nc), np.zeros((nc, 3))
+    k = d_out.argmax(1)
+    pm, pp = d_out[np.arange(len(pts)), k], pts[np.arange(len(pts)), k]
+    o = np.lexsort((-pm, cell))
+    first = o[np.r_[0, np.flatnonzero(np.diff(cell[o])) + 1]]
+    err[cell[first]], where[cell[first]] = pm[first], pp[first]
     d_in = np.sqrt(igl.point_mesh_squared_distance(V, pts.reshape(-1, 3), tri)[0])
     vcell = np.empty(len(V), np.int64)
     vcell[F.ravel()] = np.repeat(lab, 3)
-    np.maximum.at(err, vcell, d_in)
-    return err
+    o = np.lexsort((-d_in, vcell))
+    first = o[np.r_[0, np.flatnonzero(np.diff(vcell[o])) + 1]]
+    more = d_in[first] > err[vcell[first]]
+    err[vcell[first[more]]], where[vcell[first[more]]] = d_in[first[more]], V[first[more]]
+    return err, where
 
 
 def build(V, F, lab, cl, n, m, t_curve, cR1, cR2, loose, stiff, rim, sfree, As, S, T):
@@ -339,7 +353,7 @@ def build(V, F, lab, cl, n, m, t_curve, cR1, cR2, loose, stiff, rim, sfree, As, 
             verts.append(np.asarray(p, float))
         return vid[key]
 
-    edges, arcs = [], {}
+    edges, arcs, spokes = [], {}, []
 
     def curve(v0, v1, pts):
         """A B-spline edge through the samples (at t_curve) from vertex v0 to v1."""
@@ -434,6 +448,7 @@ def build(V, F, lab, cl, n, m, t_curve, cR1, cR2, loose, stiff, rim, sfree, As, 
             pts = at(t_curve[:, None] * Mk[j] * 0.9999)
             pts[-1] = verts[um]
             spoke.append(curve(centre, um, pts))
+            spokes.append(spoke[-1])
         for j in range(k):                                 # quad at corner j: centre, mid j-1, corner j, mid j
             # Coons patch in the disk: two straight spokes, two arcs of the circle (angle ~ arc length)
             a0, a1 = ang[j] - np.pi / k, ang[j] + np.pi / k
@@ -441,7 +456,7 @@ def build(V, F, lab, cl, n, m, t_curve, cR1, cR2, loose, stiff, rim, sfree, As, 
             quad([(spoke[j - 1], True), sides[j - 1][1], sides[j][0], (spoke[j], False)],
                  coons(line(Mk[j - 1]), lambda x: ring(a1 + np.asarray(x) * (ang[j] - a1)),
                        line(Mk[j]), lambda x: ring(a0 + np.asarray(x) * (ang[j] - a0))))
-    return dict(vertices=np.array(verts), edges=edges, faces=faces, n=n)
+    return dict(vertices=np.array(verts), edges=edges, faces=faces, n=n, spokes=spokes)
 
 
 def write_step(path, bodies):
@@ -522,13 +537,18 @@ def write_step(path, bodies):
             oe = [ent(f"ORIENTED_EDGE('',*,*,#{ee[e]},{'.T.' if f else '.F.'})") for e, f in loop]
             bound = ent(f"FACE_OUTER_BOUND('',#{ent('EDGE_LOOP(' + chr(39) * 2 + ',(' + ','.join(f'#{o}' for o in oe) + '))')},.T.)")
             faces.append(ent(f"ADVANCED_FACE('',(#{bound}),#{srf},.T.)"))
-        # a solid per closed piece of the body (shortcut: a sealed cavity is written as a solid of its own,
-        # not a void; the closing leaves none in practice - upgrade to BREP_WITH_VOIDS if one shows up)
+        # a solid per closed piece, its sealed cavities as voids (a cavity no solid holds is left out)
         shell = np.asarray(sf["shell"])
+
+        def closed(sh):
+            return ent("CLOSED_SHELL('',(" + ",".join(f"#{faces[i]}" for i in np.flatnonzero(shell == sh)) + "))")
         breps = []
-        for k, sh in enumerate(np.unique(shell)):
-            cs = ent("CLOSED_SHELL('',(" + ",".join(f"#{faces[i]}" for i in np.flatnonzero(shell == sh)) + "))")
-            breps.append(ent(f"MANIFOLD_SOLID_BREP('{bname}{'' if k == 0 else f' {k + 1}'}',#{cs})"))
+        for k, sh in enumerate(sf["solids"]):
+            cs = closed(sh)
+            vs = [ent(f"ORIENTED_CLOSED_SHELL('',*,#{closed(c)},.F.)") for c in sf["voids"].get(sh, [])]
+            label = f"{bname}{'' if k == 0 else f' {k + 1}'}"
+            breps.append(ent(f"BREP_WITH_VOIDS('{label}',#{cs},(" + ",".join(f"#{o}" for o in vs) + "))") if vs
+                         else ent(f"MANIFOLD_SOLID_BREP('{label}',#{cs})"))
         prod = ent(f"PRODUCT('{bname}','{bname}','',(#{pctx}))")
         pd = ent(f"PRODUCT_DEFINITION('design','',#{ent(f'PRODUCT_DEFINITION_FORMATION({chr(39)}{chr(39)},{chr(39)}{chr(39)},#{prod})')},#{dctx})")
         rep = ent(f"ADVANCED_BREP_SHAPE_REPRESENTATION('{bname}',(" + ",".join(f"#{b}" for b in breps) + f",#{axis}),#{ctx})")
@@ -555,7 +575,6 @@ def main():
     a = ap.parse_args()
     t0 = time.time()
     v, f = indexed(read_stl(a.stl))
-    f, comp, *_ = solid_pieces(v, f)
     sf = surface(v, f, a.patches, a.n, tol=a.tol, rounds=a.rounds)
     print(f"surfaced in {time.time() - t0:.0f} s")
     print(write_step(a.out, [(Path(a.stl).stem, sf)]))

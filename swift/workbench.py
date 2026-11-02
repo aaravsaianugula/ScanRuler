@@ -263,14 +263,13 @@ class Workbench:
         (step or None, report, validation)."""
         from autosurface import surface, tessellate, write_step
         from meshio_min import write_stl
-        from step_faceted import check_import, indexed, solid_pieces
+        from step_faceted import check_import, indexed
         out = self.work / f"{self.stl.stem}_solid.step"
         report, bodies = [], []
         for name, tris in getattr(self, "delivered", None) or []:
             v, f = indexed(np.asarray(tris, float))
-            f = solid_pieces(v, f)[0]
             bodies.append((name, surface(v, f, patches * len(f) // max(sum(len(t) for _, t in self.delivered), 1) + 1,
-                                         rounds=1, tol=0.15, log=lambda s, n=name: report.append(f"  {n}: {s}"))))
+                                         tol=0.15, log=lambda s, n=name: report.append(f"  {n}: {s}"))))
         if not bodies:
             return None, "no delivered solid to surface", None
         info = write_step(out, bodies)
