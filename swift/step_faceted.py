@@ -150,6 +150,55 @@ def write_step(path, tris, name="Body", bodies=None):
     return info
 
 
+def close_slivers(v, f, most=6, area=0.01):
+    """Close the slits where two faces' triangulations meet at a T (a point of one on the other's edge, as
+    slicers repair on load): a three-edge slit by splitting the triangle across its long edge at the T
+    point (no zero-area triangle); another open loop of at most `most` edges and under `area` mm2 by a fan.
+    Larger openings stay open. Returns faces, slits closed."""
+    he = np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])
+    _, inv, cnt = np.unique(np.sort(he, axis=1), axis=0, return_inverse=True, return_counts=True)
+    open_he = he[cnt[inv] == 1]
+    if not len(open_he):
+        return f, 0
+    owner = {(int(a), int(b)): i % len(f) for i, (a, b) in enumerate(he) if cnt[inv[i]] == 1}
+    nxt = {int(b): int(a) for a, b in open_he}       # walk the hole the other way round: its fill faces out
+    f = f.copy()
+    seen, add, keep, closed = set(), [], np.ones(len(f), bool), 0
+    for start in list(nxt):
+        if start in seen:
+            continue
+        loop, x = [start], nxt.get(start)
+        while x is not None and x != start and len(loop) <= most:
+            loop.append(x)
+            x = nxt.get(x)
+        seen.update(loop)
+        if x != start or len(loop) > most:
+            continue
+        if len(loop) == 3:
+            # the T point: the vertex nearest the line through the other two; their edge's triangle splits there
+            d = [np.linalg.norm(np.cross(v[loop[(i + 2) % 3]] - v[loop[(i + 1) % 3]], v[loop[i]] - v[loop[(i + 1) % 3]]))
+                 / max(np.linalg.norm(v[loop[(i + 2) % 3]] - v[loop[(i + 1) % 3]]), 1e-15) for i in range(3)]
+            i = int(np.argmin(d))
+            t, p, q = loop[i], loop[(i + 1) % 3], loop[(i + 2) % 3]
+            # the fill would run p -> q; the existing triangle holds the edge as q -> p
+            k = owner.get((q, p))
+            if k is not None and keep[k]:
+                tri = list(f[k])
+                o = [w for w in tri if w not in (p, q)][0]
+                j = tri.index(q)
+                a_, b_ = tri[j], tri[(j + 1) % 3]          # q -> p in the triangle's own order
+                keep[k] = False
+                add.append(np.array([[a_, t, o], [t, b_, o]]))
+                closed += 1
+                continue
+        tri = np.array([[loop[0], loop[i], loop[i + 1]] for i in range(1, len(loop) - 1)])
+        a = 0.5 * np.linalg.norm(np.cross(v[tri[:, 1]] - v[tri[:, 0]], v[tri[:, 2]] - v[tri[:, 0]]), axis=1).sum()
+        if a < area:
+            add.append(tri)
+            closed += 1
+    return (np.vstack([f[keep]] + add) if add else f[keep]), closed
+
+
 def check_import(path, meshes=False, deflection=0.003):
     """The STEP read the way Bambu Studio reads it (libslic3r STEP.cpp: OCCT reader, BRepMesh_IncrementalMesh at
     linear 0.003 mm and 0.5 rad, every face's triangles welded by exact position): seconds taken, solids, and
@@ -176,7 +225,7 @@ def check_import(path, meshes=False, deflection=0.003):
     shape = r.OneShape()
     BRepMesh_IncrementalMesh(shape, deflection, False, 0.5, True)
     face_of = getattr(TopoDS, "Face_s", None) or TopoDS.Face
-    solids, problems, faces, out, ntri = 0, [], 0, [], 0
+    solids, problems, faces, out, ntri, sliver_total = 0, [], 0, [], 0, 0
     e = TopExp_Explorer(shape, TopAbs_SOLID)
     while e.More():
         solids += 1
@@ -202,9 +251,11 @@ def check_import(path, meshes=False, deflection=0.003):
         if not tris:
             problems.append(f"solid {solids}: no triangles")
             continue
-        uv, inv = np.unique(np.array(pts), axis=0, return_inverse=True)
+        uv, inv = np.unique(np.round(np.array(pts), 6), axis=0, return_inverse=True)   # 1 nm: past float noise
         f = inv.ravel()[np.array(tris)]
         f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]
+        f, slivers = close_slivers(uv, f)
+        sliver_total += slivers
         ntri += len(f)
         if meshes:
             out.append((uv, f))
@@ -220,7 +271,7 @@ def check_import(path, meshes=False, deflection=0.003):
     if not valid:
         problems.append("OCCT says the shape is not valid")
     r = dict(ok=not problems, seconds=round(time.time() - t0, 1), solids=solids, faces=faces, triangles=ntri, valid=valid,
-             problems=problems[:10])
+             problems=problems[:10], slivers_closed=sliver_total)
     return dict(r, meshes=out) if meshes else r
 
 

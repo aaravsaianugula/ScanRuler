@@ -251,12 +251,14 @@ def main():
             phase("import", "Opening the STEP the way Bambu Studio does")
             try:
                 from step_faceted import check_import
-                # past BAMBU_FACES it goes to the slicer as the 3MF anyway: read it with a coarse mesh, not
-                # Bambu's tens of millions of triangles
-                many = step.read_text(encoding="ascii", errors="ignore").count("ADVANCED_FACE(") > BAMBU_FACES
+                # past BAMBU_FACES, or smooth B-spline surfaces of a scanned shape (a slicer meshes those at 0.003 mm:
+                # tens of millions of triangles, measured), it goes to the slicer as the 3MF anyway: read it with a
+                # coarse mesh, not Bambu's
+                text = step.read_text(encoding="ascii", errors="ignore")
+                many = text.count("ADVANCED_FACE(") > BAMBU_FACES or "B_SPLINE_SURFACE" in text
                 imported = check_import(step, deflection=0.1 if many else 0.003)
                 if many:
-                    imported["triangles"] = None
+                    imported["triangles"], imported["heavy"] = None, True
             except Exception:
                 log("[run] the import check failed:\n" + traceback.format_exc())
             log(f"[run] STEP import check: {imported}")
@@ -264,7 +266,8 @@ def main():
         # Bambu Studio 2.x (OCCT 7.6) takes ~35 s + 5 ms a face (measured: 20k faces 131 s, 40k 227 s) and meshes
         # B-splines into millions of triangles: a figurine goes to the slicer as its 3MF, the same closed solid; a
         # CAD STEP of a few hundred faces as itself
-        light = imported and imported.get("faces", 0) <= BAMBU_FACES and (imported.get("triangles") or 0) <= BAMBU_TRIANGLES
+        light = (imported and not imported.get("heavy") and imported.get("faces", 0) <= BAMBU_FACES
+                 and (imported.get("triangles") or 0) <= BAMBU_TRIANGLES)
         slicer = step if imported and imported["ok"] and light else mf if mf.exists() else None
         md = [f"# {stl.stem}: reverse-engineering report", "",
               f"**{status}**: {step.name} (mode {mode}, {time.time() - t0:.0f} s)"
