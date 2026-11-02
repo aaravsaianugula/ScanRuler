@@ -112,9 +112,12 @@ def write_step(path, tris, name="Body", bodies=None):
         und, e_of = np.unique(np.sort(he, axis=1), axis=0, return_inverse=True)
         e_of = e_of.ravel()
         edge = []
-        # an edge's curve is a two-point POLYLINE on the vertices' own points: one entity, where a LINE takes
-        # three (its VECTOR and DIRECTION), and exact by construction
-        edge = [ent(f"EDGE_CURVE('',#{vx[a]},#{vx[b]},#{ent(f'POLYLINE({chr(39)}{chr(39)},(#{pt[a]},#{pt[b]}))')},.T.)") for a, b in und]
+        # an edge's curve is a LINE: OCCT (Bambu Studio's reader) transfers it 20 % faster than a two-point
+        # POLYLINE, which it turns into a B-spline and projects onto both faces
+        d = v[und[:, 1]] - v[und[:, 0]]
+        ln = np.linalg.norm(d, axis=1)
+        edge = [ent(f"EDGE_CURVE('',#{vx[a]},#{vx[b]},#{ent(f'LINE({chr(39)}{chr(39)},#{pt[a]},#{ent(f'VECTOR({chr(39)}{chr(39)},#{direction(dd / l)},{num(l, 6)})')})')},.T.)")
+                for (a, b), dd, l in zip(und, d, ln)]
         nrm = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
         nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-300
         nf, faces = len(f), []
@@ -145,6 +148,74 @@ def write_step(path, tris, name="Body", bodies=None):
             "FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));", "ENDSEC;", "DATA;"]
     Path(path).write_text("\n".join(head + lines + ["ENDSEC;", "END-ISO-10303-21;", ""]), encoding="ascii")
     return info
+
+
+def check_import(path):
+    """The STEP read the way Bambu Studio reads it (libslic3r STEP.cpp: OCCT reader, BRepMesh_IncrementalMesh at
+    linear 0.003 mm and 0.5 rad, every face's triangles welded by exact position): seconds taken, solids, and
+    the problems a slicer would show - faces with no triangles, open or non-manifold edges, flipped
+    neighbours. None without OCCT (cadquery-ocp) in this Python."""
+    try:
+        from OCP.BRep import BRep_Tool
+        from OCP.BRepCheck import BRepCheck_Analyzer
+        from OCP.BRepMesh import BRepMesh_IncrementalMesh
+        from OCP.IFSelect import IFSelect_RetDone
+        from OCP.STEPControl import STEPControl_Reader
+        from OCP.TopAbs import TopAbs_FACE, TopAbs_REVERSED, TopAbs_SOLID
+        from OCP.TopExp import TopExp_Explorer
+        from OCP.TopLoc import TopLoc_Location
+        from OCP.TopoDS import TopoDS
+    except ImportError:
+        return None
+    import time
+    t0 = time.time()
+    r = STEPControl_Reader()
+    if r.ReadFile(str(path)) != IFSelect_RetDone or not r.TransferRoots():
+        return dict(ok=False, seconds=round(time.time() - t0, 1), solids=0, problems=["OCCT could not read it"])
+    shape = r.OneShape()
+    BRepMesh_IncrementalMesh(shape, 0.003, False, 0.5, True)
+    face_of = getattr(TopoDS, "Face_s", None) or TopoDS.Face
+    solids, problems, faces = 0, [], 0
+    e = TopExp_Explorer(shape, TopAbs_SOLID)
+    while e.More():
+        solids += 1
+        pts, tris, bare = [], [], 0
+        fx = TopExp_Explorer(e.Current(), TopAbs_FACE)
+        while fx.More():
+            face, loc = face_of(fx.Current()), TopLoc_Location()
+            faces += 1
+            tri = BRep_Tool.Triangulation_s(face, loc)
+            if tri is None or tri.NbTriangles() == 0:
+                bare += 1
+            else:
+                tr, base = loc.Transformation(), len(pts)
+                for i in range(1, tri.NbNodes() + 1):
+                    p = tri.Node(i).Transformed(tr)
+                    pts.append((p.X(), p.Y(), p.Z()))
+                rev = face.Orientation() == TopAbs_REVERSED
+                for i in range(1, tri.NbTriangles() + 1):
+                    a, b, c = tri.Triangle(i).Get()
+                    tris.append((base + a - 1, base + c - 1, base + b - 1) if rev else (base + a - 1, base + b - 1, base + c - 1))
+            fx.Next()
+        e.Next()
+        if not tris:
+            problems.append(f"solid {solids}: no triangles")
+            continue
+        _, inv = np.unique(np.array(pts), axis=0, return_inverse=True)
+        f = inv.ravel()[np.array(tris)]
+        f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]
+        he = np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])
+        cnt = np.unique(np.sort(he, axis=1), axis=0, return_counts=True)[1]
+        same = np.unique(he, axis=0, return_counts=True)[1]
+        bad = dict(untriangulated_faces=bare, open_edges=int((cnt == 1).sum()), nonmanifold_edges=int((cnt > 2).sum()), flipped_edges=int((same > 1).sum()))
+        if any(bad.values()):
+            problems.append(f"solid {solids}: " + ", ".join(f"{k} {v}" for k, v in bad.items() if v))
+    if not solids:
+        problems.append("no solid in it")
+    valid = BRepCheck_Analyzer(shape).IsValid()
+    if not valid:
+        problems.append("OCCT says the shape is not valid")
+    return dict(ok=not problems, seconds=round(time.time() - t0, 1), solids=solids, faces=faces, valid=valid, problems=problems[:10])
 
 
 def main():

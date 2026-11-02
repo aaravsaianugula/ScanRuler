@@ -420,12 +420,27 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
     min_band = max(2.0, 5e-4 * measured_a)
     bands = [round(c["points"] * per_a, 2) for c in clusters(pa, d_ar, sg_ar, tolr["max"], spacing, top=10_000)]
     bands += [round(c["points"] * per_b, 2) for c in clusters(pb[supported], d_ra[supported], sg[supported], tolr["max"], spacing, top=10_000)]
+    # detail lost against the original mesh: noise averages out over a point's 24 nearest, a feature the solid
+    # misses (a tip cut off, a groove filled, an edge rounded) does not - a connected area of that local mean
+    # signed deviation past the noise is detail lost, however small the overall rms. On the scan's side only
+    # scan outside the solid counts (material missing): scan inside it is mostly a fold's inner layer under
+    # scanned surface the solid follows; material added is judged from the solid's side, off any scan
+    detail_tol, lost = max(0.05, noise), []
+    for p, d, s, per, sides, what in ((pa, d_ar, sg_ar, per_a, ("outside",), "scan surface the solid misses"),
+                                      (pb[supported], d_ra[supported], sg[supported], per_b, ("outside", "inside"), "solid surface off the scan")):
+        if len(p) >= 24:
+            b = (d * s)[cKDTree(p).query(p, 24)[1]].mean(1)
+            lost += [dict(c, area_mm2=round(c["points"] * per, 2), kind=f"detail lost: {what}", of="model")
+                     for c in clusters(p, np.abs(b), np.sign(b), detail_tol, spacing, top=10_000) if c["side"] in sides]
+    lost.sort(key=lambda c: -c["area_mm2"])
+    detail_band = max(1.0, 1e-4 * measured_a)
     checks = {
         "closed": open_e == 0 and nonman == 0,
         "rms": max(s_ar["rms"], s_ba["rms"]) <= tolr["rms"],
         "p99": max(s_ar["p99"], s_ba["p99"]) <= tolr["p99"],
         "max_area": past["scan"] <= 1e-3 * measured_a and past["solid"] <= 1e-3 * measured_b,
         "max_bands": max(bands, default=0) < min_band,
+        "detail": max((c["area_mm2"] for c in lost), default=0) < detail_band,
         # a verdict on a sliver of the scan is none: at least a quarter of its own surface must be measured
         "coverage": bool((scanned & bounding).sum() >= 0.25 * scanned.sum()),
     }
@@ -434,7 +449,7 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
         verdict="PASS" if all(checks.values()) else "FAIL", mode="organic", noise=noise, spacing=spacing,
         checks=checks, tolerances=tolr, input_to_model=s_ar, model_to_input=s_ba,
         volume=dict(input=None, model=abs(volume(R)), diff_pct=0.0),
-        worst_faces=[], bad_dimensions=[], deviation_clusters=devs[:10], dimensions_checked=0, dimensions_ok=0,
+        worst_faces=[], bad_dimensions=[], deviation_clusters=(lost[:5] + devs)[:10], dimensions_checked=0, dimensions_ok=0,
         solid=dict(triangles=len(R), open_edges=open_e, nonmanifold_edges=nonman),
         removed_area_mm2=round(area(A[~kept]), 1),
         filled_area_mm2=round(float((~supported).mean()) * area(R), 1),
@@ -443,6 +458,8 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
         past_max_mm2={k: round(v, 1) for k, v in past.items()},
         past_max_share=dict(scan=round(past["scan"] / max(measured_a, 1e-9), 5), solid=round(past["solid"] / max(measured_b, 1e-9), 5)),
         largest_band_mm2=max(bands, default=0.0), min_band_mm2=round(min_band, 1), bridged_mm2=round(bridged_mm2, 1),
+        detail=dict(tol=round(detail_tol, 4), largest_lost_mm2=max((c["area_mm2"] for c in lost), default=0.0),
+                    lost_mm2=round(sum(c["area_mm2"] for c in lost), 1), allowed_mm2=round(detail_band, 1)),
     )
 
 
@@ -460,6 +477,8 @@ def summary(r):
             f"past max {r['tolerances']['max']:.3f}: scan {r['past_max_mm2']['scan']} mm2 ({100 * r['past_max_share']['scan']:.3f} %), "
             f"solid {r['past_max_mm2']['solid']} mm2 ({100 * r['past_max_share']['solid']:.3f} %) of 0.1 % allowed; "
             f"largest band {r['largest_band_mm2']} mm2 of {r['min_band_mm2']} allowed",
+            *([f"detail vs the original mesh (local mean deviation past {r['detail']['tol']:.3f}): largest area lost "
+               f"{r['detail']['largest_lost_mm2']} mm2 of {r['detail']['allowed_mm2']} allowed, {r['detail']['lost_mm2']} mm2 in all"] if r.get("detail") else []),
             "failed: " + (", ".join(k for k, v in r["checks"].items() if not v) or "none")])
     f = lambda s: f"rms {s['rms']:.4f} p95 {s['p95']:.4f} p99 {s['p99']:.4f} max {s['max']:.4f}"
     lines = [f"VERDICT {r['verdict']} ({r['mode']}" + (f", noise sigma {r['noise']:.4f}" if r["noise"] else "") + ")",

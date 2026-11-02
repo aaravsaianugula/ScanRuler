@@ -80,3 +80,8 @@ if OCP:
         BRepGProp.VolumeProperties_s(r.OneShape(), props)
         assert BRepCheck_Analyzer(r.OneShape()).IsValid() and abs(props.Mass() - (1000 - 64)) < 0.01, props.Mass()
         print("hollow ok in native OCCT", props.Mass())
+        # opened as Bambu Studio opens it: one watertight solid, no face left untriangulated
+        from step_faceted import check_import
+        imp = check_import(out)
+        assert imp["ok"] and imp["solids"] == 1 and imp["faces"] == 24, imp
+        print("hollow ok as Bambu Studio imports it", imp)

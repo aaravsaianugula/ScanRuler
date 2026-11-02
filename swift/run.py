@@ -225,10 +225,25 @@ def main():
             status, step = "NOT VALIDATED", wb.organic_step
         else:
             status, step = "NOT VALIDATED", work / "best_attempt_CAD.step"
+        # the STEP read as Bambu Studio reads it: a slicer gets the solid when it opens whole, else the 3MF
+        imported = None
+        if step.exists():
+            phase("import", "Opening the STEP the way Bambu Studio does")
+            try:
+                from step_faceted import check_import
+                imported = check_import(step)
+            except Exception:
+                log("[run] the import check failed:\n" + traceback.format_exc())
+            log(f"[run] STEP import check: {imported}")
+        mf = step.with_suffix(".3mf")
+        slicer = step if imported and imported["ok"] else mf if mf.exists() else None
         md = [f"# {stl.stem}: reverse-engineering report", "",
               f"**{status}**: {step.name} (mode {mode}, {time.time() - t0:.0f} s)"
-              + (f"; for a slicer, the same triangles: {step.with_suffix('.3mf').name}" if step.with_suffix(".3mf").exists() else ""), "",
-              "## Validation (independent)", "```", summary(r) if r else "no model was checked", "```", "",
+              + (f"; for a slicer, the same triangles: {mf.name}" if mf.exists() else ""), "",
+              "## Validation (independent, against the original mesh)", "```", summary(r) if r else "no model was checked", "```", "",
+              "## STEP opened as Bambu Studio opens it", (f"{'OK' if imported['ok'] else 'PROBLEMS'}: {imported['solids']} solids, "
+              f"{imported.get('faces', 0)} faces, {imported['seconds']} s" + "".join(f"\n- {p}" for p in imported["problems"])) if imported
+              else "not checked (no OCCT in this Python)", "",
               "## How it was built", report or "(no report)"]
         if organic and getattr(wb, "bodies", None):
             md += ["", "## Bodies (a named solid each in the STEP)"] + [f"- {b['name']}: {b['volume']} mm3, box {b['lo']}..{b['hi']}" for b in wb.bodies]
@@ -236,7 +251,7 @@ def main():
         report_path.write_text("\n".join(md), encoding="utf-8")
         log(f"[run] {status} -> {work}")
         emit("done", status=status, work=str(work), step=str(step) if step.exists() else None,
-             print=str(step.with_suffix(".3mf")) if step.with_suffix(".3mf").exists() else None,
+             print=str(slicer) if slicer else None, imported=imported,
              report=str(report_path), seconds=round(time.time() - t0), validation=r)
         return 0 if status == "PASS" else 1
     except Exception as e:

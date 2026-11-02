@@ -240,10 +240,12 @@ class Workbench:
         self.closed, self.grid = closed, grid      # the validator tells bridged gaps from them
         report.append(f"closed on a {grid:.3g} mm grid: {len(solid)} triangles, {closed.name}")
         reduced = reduce_mesh(solid, max_triangles)
+        report.append(f"reduced to {len(reduced)} triangles (MeshLab quadric, topology kept, thin walls kept from cutting through each other)")
+        reduced = self._fewest_faces(reduced, closed, grid, report)
         write_stl(self.reduced, reduced)
         self.look = self.work / f"{stem}_look.stl"         # what the part finders read: evenly coarse
         write_stl(self.look, reduce_mesh(solid, max_triangles, safe=False))
-        report.append(f"reduced to {len(reduced)} triangles (MeshLab quadric, topology kept, thin walls kept from cutting through each other): {self.reduced.name}")
+        report.append(f"delivered at {len(reduced)} faces: {self.reduced.name}")
         info = write_step(self.organic_step, read_stl(self.reduced), stem)
         report.append(f"STEP solid: {self.organic_step.name}, {info['faces']} faces, {info['solids']} solids, {info['voids']} cavities"
                       + (f"; {info['faces_left_out']} faces of a cavity no solid holds left out" if info["faces_left_out"] else ""))
@@ -251,6 +253,27 @@ class Workbench:
         self.rods, self.rings = [], []
         self._bodies([(stem, read_stl(self.reduced))], [], [])
         return "\n".join(report)
+
+    def _fewest_faces(self, tris, closed, grid, report, floor=20000):
+        """A slicer reads a faceted STEP at about a millisecond a face (Bambu Studio: 200k faces, over three
+        minutes): halving from the full reduction, the fewest faces that still pass the validator against the
+        original mesh, its detail check included. The first halving that fails stops it."""
+        from meshio_min import write_stl
+        from organic_solid import reduce_mesh
+        best, trial = tris, self.work / f"{self.stl.stem}_trial.stl"
+        while len(best) // 2 >= floor:
+            t = reduce_mesh(best, len(best) // 2)
+            if len(t) > 0.9 * len(best):        # thin walls kept dense: this is as few as it goes without cutting through
+                break
+            write_stl(trial, t)
+            r = validate_organic(self.input, self.repaired, trial, closed=closed, grid=grid)
+            report.append(f"  {len(t)} faces: {r['verdict']}, detail lost {r['detail']['largest_lost_mm2']} mm2 of "
+                          f"{r['detail']['allowed_mm2']} allowed" + ("" if r["verdict"] == "PASS" else f" ({', '.join(k for k, v in r['checks'].items() if not v)}): keeping {len(best)}"))
+            if r["verdict"] != "PASS":
+                break
+            best = t
+        trial.unlink(missing_ok=True)
+        return best
 
     def _mesh_step(self, c, report, tries=2):
         """One ScanRuler mesh call, at its best: the answer, {} for "nothing to do", None when it did not go
