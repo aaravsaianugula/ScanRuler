@@ -150,11 +150,12 @@ def write_step(path, tris, name="Body", bodies=None):
     return info
 
 
-def check_import(path):
+def check_import(path, meshes=False, deflection=0.003):
     """The STEP read the way Bambu Studio reads it (libslic3r STEP.cpp: OCCT reader, BRepMesh_IncrementalMesh at
     linear 0.003 mm and 0.5 rad, every face's triangles welded by exact position): seconds taken, solids, and
     the problems a slicer would show - faces with no triangles, open or non-manifold edges, flipped
-    neighbours. None without OCCT (cadquery-ocp) in this Python."""
+    neighbours; with meshes, each solid's welded triangles as (vertices, faces) too. None without OCCT
+    (cadquery-ocp) in this Python."""
     try:
         from OCP.BRep import BRep_Tool
         from OCP.BRepCheck import BRepCheck_Analyzer
@@ -173,9 +174,9 @@ def check_import(path):
     if r.ReadFile(str(path)) != IFSelect_RetDone or not r.TransferRoots():
         return dict(ok=False, seconds=round(time.time() - t0, 1), solids=0, problems=["OCCT could not read it"])
     shape = r.OneShape()
-    BRepMesh_IncrementalMesh(shape, 0.003, False, 0.5, True)
+    BRepMesh_IncrementalMesh(shape, deflection, False, 0.5, True)
     face_of = getattr(TopoDS, "Face_s", None) or TopoDS.Face
-    solids, problems, faces = 0, [], 0
+    solids, problems, faces, out, ntri = 0, [], 0, [], 0
     e = TopExp_Explorer(shape, TopAbs_SOLID)
     while e.More():
         solids += 1
@@ -201,9 +202,12 @@ def check_import(path):
         if not tris:
             problems.append(f"solid {solids}: no triangles")
             continue
-        _, inv = np.unique(np.array(pts), axis=0, return_inverse=True)
+        uv, inv = np.unique(np.array(pts), axis=0, return_inverse=True)
         f = inv.ravel()[np.array(tris)]
         f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]
+        ntri += len(f)
+        if meshes:
+            out.append((uv, f))
         he = np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])
         cnt = np.unique(np.sort(he, axis=1), axis=0, return_counts=True)[1]
         same = np.unique(he, axis=0, return_counts=True)[1]
@@ -215,7 +219,9 @@ def check_import(path):
     valid = BRepCheck_Analyzer(shape).IsValid()
     if not valid:
         problems.append("OCCT says the shape is not valid")
-    return dict(ok=not problems, seconds=round(time.time() - t0, 1), solids=solids, faces=faces, valid=valid, problems=problems[:10])
+    r = dict(ok=not problems, seconds=round(time.time() - t0, 1), solids=solids, faces=faces, triangles=ntri, valid=valid,
+             problems=problems[:10])
+    return dict(r, meshes=out) if meshes else r
 
 
 def main():

@@ -70,6 +70,9 @@ def surface_shares(stl, samples=40000, candidates=1500, deg=8):
 
 
 BAMBU_FACES = 5000      # a STEP Bambu Studio opens in about a minute
+# Bambu Studio meshes a STEP at 0.003 mm (its default): a few hundred triangles per B-spline span however small,
+# so a surfaced figurine's thousands of patches come to millions (Kurisu, 9.4k patches: 34M) - past this, the 3MF
+BAMBU_TRIANGLES = 2_000_000
 
 ORGANIC_REPORT = ("Organic route: islands removed and holes filled in ScanRuler, closed into a manifold solid (winding number + "
                   "marching cubes, sealed crevices kept as cavities), decimated keeping it closed (MeshLab), written as a faceted STEP solid.")
@@ -227,27 +230,50 @@ def main():
             status, step = "NOT VALIDATED", wb.organic_step
         else:
             status, step = "NOT VALIDATED", work / "best_attempt_CAD.step"
+        # the CAD deliverable: the solid as smooth B-spline surfaces (not a triangle a face) when they pass the
+        # same validator against the original mesh; else the faceted solid stays the deliverable
+        smooth_r = None
+        if status == "PASS" and organic:
+            phase("surface", "Fitting smooth CAD surfaces over the solid")
+            try:
+                smooth, srep, smooth_r = wb.smooth()
+                log(srep)
+                report = (report + "\n\n" if report else "") + "Smooth CAD surfaces:\n" + srep
+                if smooth:
+                    step = smooth
+                else:
+                    report += f"\nThe smooth surfaces did not pass: the deliverable stays the faceted solid {step.name}."
+            except Exception:
+                log("[run] surfacing failed, the faceted solid stays the deliverable:\n" + traceback.format_exc())
         # the STEP read as Bambu Studio reads it: a slicer gets the solid when it opens whole, else the 3MF
         imported = None
         if step.exists():
             phase("import", "Opening the STEP the way Bambu Studio does")
             try:
                 from step_faceted import check_import
-                imported = check_import(step)
+                # past BAMBU_FACES it goes to the slicer as the 3MF anyway: read it with a coarse mesh, not
+                # Bambu's tens of millions of triangles
+                many = step.read_text(encoding="ascii", errors="ignore").count("ADVANCED_FACE(") > BAMBU_FACES
+                imported = check_import(step, deflection=0.1 if many else 0.003)
+                if many:
+                    imported["triangles"] = None
             except Exception:
                 log("[run] the import check failed:\n" + traceback.format_exc())
             log(f"[run] STEP import check: {imported}")
-        mf = step.with_suffix(".3mf")
-        # Bambu Studio 2.x (OCCT 7.6) takes ~35 s + 5 ms a face (measured: 20k faces 131 s, 40k 227 s): a faceted
-        # figurine goes to the slicer as its 3MF, the same closed solid; a CAD STEP of a few hundred faces as itself
-        slicer = step if imported and imported["ok"] and imported.get("faces", 0) <= BAMBU_FACES else mf if mf.exists() else None
+        mf = wb.organic_step.with_suffix(".3mf") if organic else step.with_suffix(".3mf")
+        # Bambu Studio 2.x (OCCT 7.6) takes ~35 s + 5 ms a face (measured: 20k faces 131 s, 40k 227 s) and meshes
+        # B-splines into millions of triangles: a figurine goes to the slicer as its 3MF, the same closed solid; a
+        # CAD STEP of a few hundred faces as itself
+        light = imported and imported.get("faces", 0) <= BAMBU_FACES and (imported.get("triangles") or 0) <= BAMBU_TRIANGLES
+        slicer = step if imported and imported["ok"] and light else mf if mf.exists() else None
         md = [f"# {stl.stem}: reverse-engineering report", "",
               f"**{status}**: {step.name} (mode {mode}, {time.time() - t0:.0f} s)"
               + (f"; for a slicer, the same triangles: {mf.name}" if mf.exists() else ""), "",
               "## Validation (independent, against the original mesh)", "```", summary(r) if r else "no model was checked", "```", "",
+              *(["## Smooth surfaces against the original mesh", "```", summary(smooth_r), "```", ""] if smooth_r else []),
               "## STEP opened as Bambu Studio opens it", (f"{'OK' if imported['ok'] else 'PROBLEMS'}: {imported['solids']} solids, "
-              f"{imported.get('faces', 0)} faces, {imported['seconds']} s here, Bambu Studio about "
-              f"{35 + 0.005 * imported.get('faces', 0):.0f} s" + ("" if imported.get("faces", 0) <= BAMBU_FACES else f" (too slow: the slicer gets {mf.name})") + "".join(f"\n- {p}" for p in imported["problems"])) if imported
+              f"{imported.get('faces', 0)} faces, " + (f"{imported['triangles']} triangles at Bambu's 0.003 mm, " if imported.get("triangles") else "") + f"{imported['seconds']} s here"
+              + ("" if light else f" (too heavy for a slicer: it gets {mf.name}, the same solid as triangles)") + "".join(f"\n- {p}" for p in imported["problems"])) if imported
               else "not checked (no OCCT in this Python)", "",
               "## How it was built", report or "(no report)"]
         if organic and getattr(wb, "bodies", None):

@@ -256,6 +256,43 @@ class Workbench:
         self._bodies([(stem, read_stl(self.reduced))], [], [])
         return "\n".join(report)
 
+    def smooth(self, patches=3000):
+        """The delivered bodies as smooth CAD surfaces (autosurface: four-sided B-spline patches with shared
+        edges, one watertight solid per body), written to <stem>_solid.step and judged like the faceted solid:
+        its tessellation, as a slicer reads it, through the validator against the original mesh. Returns
+        (step or None, report, validation)."""
+        from autosurface import surface, tessellate, write_step
+        from meshio_min import write_stl
+        from step_faceted import check_import, indexed, solid_pieces
+        out = self.work / f"{self.stl.stem}_solid.step"
+        report, bodies = [], []
+        for name, tris in getattr(self, "delivered", None) or []:
+            v, f = indexed(np.asarray(tris, float))
+            f = solid_pieces(v, f)[0]
+            bodies.append((name, surface(v, f, patches * len(f) // max(sum(len(t) for _, t in self.delivered), 1) + 1,
+                                         rounds=1, tol=0.15, log=lambda s, n=name: report.append(f"  {n}: {s}"))))
+        if not bodies:
+            return None, "no delivered solid to surface", None
+        info = write_step(out, bodies)
+        report.append(f"smooth STEP: {out.name}, {info['faces']} B-spline faces, {info['solids']} solids")
+        # OCCT reads it back (coarse mesh: the read and the solids are the question here, not the triangles)
+        imp = check_import(out, deflection=0.1)
+        if imp is not None:
+            report.append(f"read back in OCCT: {'OK' if imp['ok'] else 'PROBLEMS ' + '; '.join(imp['problems'])}, "
+                          f"{imp['solids']} solids, {imp['seconds']} s")
+        # the surfaces themselves, on a fine grid, against the original mesh like the faceted solid
+        pieces = [vf for _, sf in bodies for vf in tessellate(sf, g=8)]
+        tess = self.work / f"{self.stl.stem}_solid_tess.stl"
+        write_stl(tess, np.concatenate([V[F] for V, F in pieces]))
+        r = validate_organic(self.input, self.repaired, tess, closed=self.closed, grid=self.grid,
+                             bodies=[(f"solid {i + 1}", V[F]) for i, (V, F) in enumerate(pieces)])
+        tess.unlink(missing_ok=True)
+        report.append(f"smooth surfaces against the original mesh: {r['verdict']}")
+        ok = (imp is None or imp["ok"]) and r["verdict"] == "PASS"
+        if not ok:              # never left where it could pass for the deliverable
+            out.unlink(missing_ok=True)
+        return (out if ok else None), "\n".join(report), r
+
     def _fewest_faces(self, tris, closed, grid, report, floor=20000):
         """A slicer reads a faceted STEP at about a millisecond a face (Bambu Studio: 200k faces, over three
         minutes): halving from the full reduction, the fewest faces that still pass the validator against the
