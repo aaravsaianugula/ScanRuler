@@ -367,7 +367,70 @@ def enclosing(tris, pts, eps=0.05):
     return (igl.fast_winding_number(v, f, pts - eps * nrm) > 0.75) & (igl.fast_winding_number(v, f, pts + eps * nrm) < 0.25)
 
 
-def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed=None, grid=None):
+def tunnels(tris):
+    """Handles through a closed mesh (its genus, summed over its shells): a figurine has a few, a thin surface
+    closed as lace has hundreds."""
+    _, inv = np.unique(np.round(tris.reshape(-1, 3), 6), axis=0, return_inverse=True)
+    f = inv.reshape(-1, 3)
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    nv = int(f.max()) + 1
+    shells = len(np.unique(connected_components(coo_matrix((np.ones(3 * len(f)), (f.ravel(), np.roll(f, 1, axis=1).ravel())),
+                                                           shape=(nv, nv)), directed=False)[1][f[:, 0]]))
+    edges = len(np.unique(np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1), axis=0))
+    return max(0, (2 * shells - (len(np.unique(f)) - edges + len(f))) // 2)
+
+
+def solid_gate(scan, bodies, grid, noise, points=3_000_000, seed=0):
+    """What a slicer fills, against what the scan holds - the bodies exactly as written for it.
+    - every body a closed shell facing out (a slicer drops an open or inside-out part: nothing printed there);
+    - the scan's volume is solid: points clearly inside the scan (winding number) and away from its surface
+      must be inside a body, and so must every point of thin scanned surface (a hand, a face, hair: it is a
+      plate there) - lace or a void fails;
+    - the solid stays in the scan: points clearly outside it, past a plate's half thickness from its
+      surface, must be outside every body;
+    - tunnels: a thin surface closed as lace has hundreds."""
+    import igl
+    from organic_solid import indexed as ix, plate_radius, sheet_faces
+    V, F = ix(scan)
+    per, inside = [], None
+    every = np.concatenate([V] + [t.reshape(-1, 3) for _, t in bodies])     # solid grown past the scan is in the box too
+    lo, hi = every.min(0), every.max(0)
+    rng = np.random.default_rng(seed)
+    P = lo + rng.random((points, 3)) * (hi - lo)
+    cell = float(np.prod(hi - lo)) / points
+    thin = V[F][sheet_faces(V, F, grid)]
+    thin_mm2 = float(0.5 * np.linalg.norm(np.cross(thin[:, 1] - thin[:, 0], thin[:, 2] - thin[:, 0]), axis=1).sum())
+    S = sample_area(thin, int(min(300_000, max(1000, thin_mm2 / 0.04))), seed=seed)[0] if len(thin) else np.zeros((0, 3))   # 5 per mm2
+    in_p, in_s, holes = np.zeros(points, bool), np.zeros(len(S), bool), 0
+    for name, t in bodies:
+        oe, nm = edge_counts(t)
+        vol = volume(t)
+        k = tunnels(t)
+        holes += k
+        per.append(dict(name=name, open_edges=oe, nonmanifold_edges=nm, volume=round(vol, 1), tunnels=k, ok=oe == 0 and nm == 0 and vol > 0))
+        bv, bf = ix(t)
+        in_p |= igl.fast_winding_number(bv, bf, P) > 0.5
+        if len(S):
+            in_s |= igl.fast_winding_number(bv, bf, S) > 0.5
+    w = igl.fast_winding_number(V, F, P)
+    d = np.sqrt(igl.point_mesh_squared_distance(P, V, F)[0])
+    band = max(2 * noise + 0.05, 1.5 * grid)
+    held = (w > 0.8) & (d > band)
+    missing = held & ~in_p
+    extra = (w < 0.2) & (d > plate_radius(grid) + band) & in_p
+    scan_vol = max(float(held.sum()) * cell, 1e-9)
+    r = dict(bodies=per, tunnels=int(holes), scan_volume_mm3=round(scan_vol, 1),
+             missing_mm3=round(float(missing.sum()) * cell, 1), extra_mm3=round(float(extra.sum()) * cell, 1),
+             thin_surface_mm2=round(thin_mm2, 1),
+             thin_not_solid_share=round(float((~in_s).mean()) if len(S) else 0.0, 4))
+    r["checks"] = dict(bodies_closed=all(b["ok"] for b in per), volume_solid=r["missing_mm3"] <= 1e-3 * scan_vol,
+                       stays_in_scan=r["extra_mm3"] <= 1e-3 * scan_vol, thin_surface_solid=r["thin_not_solid_share"] <= 0.01,
+                       no_lace=holes <= 150)      # Kurisu: 79 with its gear rings fused on, 1522 when closed as lace
+    return r
+
+
+def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed=None, grid=None, bodies=None):
     """The organic route's gate: the delivered solid (reduced) is the scan, closed, within the scan's own
     noise (the scan-mode rule). The max is judged by area, not by its one worst point: at most a thousandth
     of the measured surface past the max tolerance, and none of it in a band (a connected region) larger
@@ -409,12 +472,18 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
         bridged_mm2 = area(C[gap])
         on_gap = gap[cKDTree(C.mean(1)).query(pb)[1]]
         supported &= ~on_gap
-    s_ar, s_ba = stats(d_ar), stats(d_ra[supported])
     open_e, nonman = edge_counts(R)
     tolr = dict(rms=max(tol, 1.25 * noise + 0.01), p95=2.5 * noise + 0.02, p99=3.5 * noise + 0.03, max=8 * noise + 0.2,
                 vol=None, dim=None, face_p95=None)
-    # each sample stands for its share of its surface: past-max area and bands in mm2
+    # scan surface buried in the solid past the max: an inner layer the solid fills (the skull under a hair shell,
+    # a fold's inner sheet) - reported, not measured; material the solid adds over the scan is judged from the
+    # solid's side (detail check)
     per_a, per_b = area(R0) / len(pr), area(R) / len(pb)
+    buried = (sg_ar < 0) & (d_ar > tolr["max"])
+    buried_mm2 = float(buried.sum() * per_a)
+    pa, d_ar, sg_ar = pa[~buried], d_ar[~buried], sg_ar[~buried]
+    s_ar, s_ba = stats(d_ar), stats(d_ra[supported])
+    # each sample stands for its share of its surface: past-max area and bands in mm2
     measured_a, measured_b = len(pa) * per_a, int(supported.sum()) * per_b
     past = dict(scan=float((d_ar > tolr["max"]).sum() * per_a), solid=float((d_ra[supported] > tolr["max"]).sum() * per_b))
     min_band = max(2.0, 5e-4 * measured_a)
@@ -434,6 +503,8 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
                      for c in clusters(p, np.abs(b), np.sign(b), detail_tol, spacing, top=10_000) if c["side"] in sides]
     lost.sort(key=lambda c: -c["area_mm2"])
     detail_band = max(1.0, 1e-4 * measured_a)
+    # the bodies as written for the slicer, against the scan's volume (solid_gate)
+    gate = solid_gate(R0, bodies or [("solid", R)], grid or spacing, noise)
     checks = {
         "closed": open_e == 0 and nonman == 0,
         "rms": max(s_ar["rms"], s_ba["rms"]) <= tolr["rms"],
@@ -441,6 +512,7 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
         "max_area": past["scan"] <= 1e-3 * measured_a and past["solid"] <= 1e-3 * measured_b,
         "max_bands": max(bands, default=0) < min_band,
         "detail": max((c["area_mm2"] for c in lost), default=0) < detail_band,
+        **{f"solid: {k}": v for k, v in gate["checks"].items()},
         # a verdict on a sliver of the scan is none: at least a quarter of its own surface must be measured
         "coverage": bool((scanned & bounding).sum() >= 0.25 * scanned.sum()),
     }
@@ -454,10 +526,12 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
         removed_area_mm2=round(area(A[~kept]), 1),
         filled_area_mm2=round(float((~supported).mean()) * area(R), 1),
         sheet_area_mm2=round(float((scanned & ~bounding).mean()) * area(R0), 1),
+        buried_mm2=round(buried_mm2, 1),
         sheet_share=round(float((scanned & ~bounding).sum() / max(1, scanned.sum())), 4),
         past_max_mm2={k: round(v, 1) for k, v in past.items()},
         past_max_share=dict(scan=round(past["scan"] / max(measured_a, 1e-9), 5), solid=round(past["solid"] / max(measured_b, 1e-9), 5)),
         largest_band_mm2=max(bands, default=0.0), min_band_mm2=round(min_band, 1), bridged_mm2=round(bridged_mm2, 1),
+        solid_gate=gate,
         detail=dict(tol=round(detail_tol, 4), largest_lost_mm2=max((c["area_mm2"] for c in lost), default=0.0),
                     lost_mm2=round(sum(c["area_mm2"] for c in lost), 1), allowed_mm2=round(detail_band, 1)),
     )
@@ -473,12 +547,18 @@ def summary(r):
             f"noise sigma {r['noise']:.4f}: tolerances rms {r['tolerances']['rms']:.3f} p99 {r['tolerances']['p99']:.3f} max {r['tolerances']['max']:.3f}",
             f"filled holes {r['filled_area_mm2']} mm2, removed islands {r['removed_area_mm2']} mm2, "
             f"single sheets {r['sheet_area_mm2']} mm2 ({100 * r['sheet_share']:.1f} % of the scan: no closed solid lies on them, not measured), "
+            f"inner scan layers buried in the solid {r.get('buried_mm2', 0)} mm2 (filled, not measured), "
             f"gaps bridged by the closing {r.get('bridged_mm2', 0)} mm2 (no scan there, not measured)",
             f"past max {r['tolerances']['max']:.3f}: scan {r['past_max_mm2']['scan']} mm2 ({100 * r['past_max_share']['scan']:.3f} %), "
             f"solid {r['past_max_mm2']['solid']} mm2 ({100 * r['past_max_share']['solid']:.3f} %) of 0.1 % allowed; "
             f"largest band {r['largest_band_mm2']} mm2 of {r['min_band_mm2']} allowed",
             *([f"detail vs the original mesh (local mean deviation past {r['detail']['tol']:.3f}): largest area lost "
                f"{r['detail']['largest_lost_mm2']} mm2 of {r['detail']['allowed_mm2']} allowed, {r['detail']['lost_mm2']} mm2 in all"] if r.get("detail") else []),
+            *([f"solid as the slicer gets it: {len(r['solid_gate']['bodies'])} bodies, open/inside-out "
+               f"{sum(not b['ok'] for b in r['solid_gate']['bodies'])}, tunnels {r['solid_gate']['tunnels']}; scan volume not solid "
+               f"{r['solid_gate']['missing_mm3']} mm3, solid outside the scan {r['solid_gate']['extra_mm3']} mm3 (of "
+               f"{r['solid_gate']['scan_volume_mm3']}); thin surface ({r['solid_gate']['thin_surface_mm2']} mm2) not solid "
+               f"{100 * r['solid_gate']['thin_not_solid_share']:.1f} %"] if r.get("solid_gate") else []),
             "failed: " + (", ".join(k for k, v in r["checks"].items() if not v) or "none")])
     f = lambda s: f"rms {s['rms']:.4f} p95 {s['p95']:.4f} p99 {s['p99']:.4f} max {s['max']:.4f}"
     lines = [f"VERDICT {r['verdict']} ({r['mode']}" + (f", noise sigma {r['noise']:.4f}" if r["noise"] else "") + ")",

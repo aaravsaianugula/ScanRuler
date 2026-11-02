@@ -56,6 +56,8 @@ def write_3mf(path, bodies):
     objs.append(f'<object id="{top}" name={quoteattr(Path(path).stem)} type="model"><components>{"".join(items)}</components></object>')
     model = ('<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" '
              'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">'
+             # without a producer Bambu Studio calls the file's config invalid; named, it loads the geometry quietly
+             '<metadata name="Application">ScanRuler-Swift</metadata>'
              f'<resources>{"".join(objs)}</resources><build><item objectid="{top}"/></build></model>')
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'

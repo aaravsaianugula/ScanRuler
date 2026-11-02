@@ -58,3 +58,16 @@ assert ag.t_finish("stuck", give_up=True) is None
 ag = Agent(SimpleNamespace(whole="x.stl"), "scan", log=lambda *a: None, max_turns=60)
 assert ag.t_finish("stuck", give_up=True) is None
 print("ok give-up guard")
+
+# the solid gate: a 10 mm cube judged against itself passes; inside out, half missing, or grown, it fails
+from validate import solid_gate, tunnels  # noqa: E402
+C = T * 10
+assert tunnels(C) == 0
+ok = solid_gate(C, [("cube", C)], 0.2, 0.01, points=200_000)["checks"]
+assert all(ok.values()), ok
+assert not solid_gate(C, [("cube", C[:, ::-1])], 0.2, 0.01, points=200_000)["checks"]["bodies_closed"]
+half = C * np.array([1, 1, 0.5])
+assert not solid_gate(C, [("half", half)], 0.2, 0.01, points=200_000)["checks"]["volume_solid"]
+grown = (C - 5) * 1.3 + 5
+assert not solid_gate(C, [("grown", grown)], 0.2, 0.01, points=200_000)["checks"]["stays_in_scan"]
+print("solid gate ok")

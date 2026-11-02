@@ -173,7 +173,8 @@ class Workbench:
         if mode == "organic":
             if not getattr(self, "reduced", None) or not self.reduced.exists():
                 return "no organic solid yet: run the organic route first"
-            r = validate_organic(self.input, self.repaired, self.reduced, closed=self.closed, grid=self.grid)
+            r = validate_organic(self.input, self.repaired, self.reduced, closed=self.closed, grid=self.grid,
+                                 bodies=getattr(self, "delivered", None))
             self.last_validation = r
             (self.work / "validation.json").write_text(json.dumps(r, indent=1))
             return summary(r)
@@ -250,6 +251,7 @@ class Workbench:
         report.append(f"STEP solid: {self.organic_step.name}, {info['faces']} faces, {info['solids']} solids, {info['voids']} cavities"
                       + (f"; {info['faces_left_out']} faces of a cavity no solid holds left out" if info["faces_left_out"] else ""))
         self.whole, self.pieces = self.reduced, None      # what group_bodies starts from, every time
+        self.delivered = [(stem, reduced)]                 # the bodies as written: what the validator's solid gate judges
         self.rods, self.rings = [], []
         self._bodies([(stem, read_stl(self.reduced))], [], [])
         return "\n".join(report)
@@ -442,11 +444,20 @@ class Workbench:
                                                 getattr(self, 'rods', None) or ())
         except (ValueError, KeyError, TypeError) as e:
             return f"refused: {e}"
+        # a slicer drops a body that is open or inside out (Kurisu's knife-cut ring fragments printed nothing):
+        # every body must be closed and face out, or the solid goes as the one body it is, uncut
+        from validate import edge_counts, volume
+        tri = lambda b: b[0][b[1]] if isinstance(b, tuple) else b
+        broken = [n for n, b in bodies if edge_counts(tri(b)) != (0, 0) or volume(tri(b)) <= 0]
+        if broken:
+            bodies, cuts, kept = [(self.stl.stem, kept)], [], kept
         self.reduced = self.work / f"{self.stl.stem}_bodies.stl"
         write_stl(self.reduced, kept)
         info = write_step(self.organic_step, None, bodies=bodies)
         self._bodies(bodies, dropped, cuts)
-        return "\n".join([f"STEP {self.organic_step.name}: {info['products']} bodies, {info['solids']} solids, {info['voids']} cavities; "
+        self.delivered = [(n, tri(b)) for n, b in bodies]
+        return "\n".join(([f"REFUSED the split: bodies {', '.join(map(str, broken[:8]))} came out open or inside out, so the solid "
+                           "is written as one body"] if broken else []) + [f"STEP {self.organic_step.name}: {info['products']} bodies, {info['solids']} solids, {info['voids']} cavities; "
                           f"picture: {self.work / 'bodies.png'} (view_image: is each part one body, and nothing of one in another?)"]
                          + [f"  {b['name']}: {b['volume']} mm3, box {b['lo']}..{b['hi']}" for b in self.bodies]
                          + [f"  {c['name']}: {c['kind']} cut from pieces {c['pieces']}, {c['volume']} mm3"

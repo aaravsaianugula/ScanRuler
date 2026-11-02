@@ -71,23 +71,49 @@ def grid_for(tris):
     return float(max(0.05, diag / 1650, min(diag / 1100, edge / 2.25), (np.prod(ext + 1) / 1e9) ** (1 / 3)))
 
 
+def sheet_faces(V, F, h):
+    """Which faces of an oriented scan are thin surface with no solid behind them (a face, a hand, hair: an open
+    sheet): the winding number a step and a half behind the face is not clearly inside. Surface with solid
+    behind it bounds the body already, however noisy in front (a fold's outer layer), and is not thickened."""
+    t = V[F]
+    nrm = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
+    nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-20
+    return igl.fast_winding_number(V, F, t.mean(1) - 1.5 * h * nrm) <= 0.75
+
+
+def plate_radius(h):
+    """Half the thickness a thin scanned surface is given: 0.8 mm plates at least (two 0.4 mm nozzle lines)."""
+    return max(1.5 * h, 0.4)
+
+
 def close_mesh(tris, h=None, slab=24):
     """Triangles of the closed surface (none when the scan encloses no volume: a single open sheet).
     Pieces are turned to face out first. Marching cubes runs in z slabs sharing one layer (memory), and
     the slabs are welded on it: both compute those vertices from the same grid values."""
     h = h or grid_for(tris)
     V, F = indexed(np.concatenate(orient(pieces(tris))))
-    lo = V.min(0) - 2 * h
-    n = np.ceil((V.max(0) + 2 * h - lo) / h).astype(int) + 1
+    # thin scanned surface with no clean inside and outside (hair, a cloak's edge, a scan's open flaps): the
+    # winding number hovers at 1/2 beside it and the closing comes out as lace (Kurisu: 1522 tunnels). Such
+    # surface becomes a plate, at least 0.8 mm thick, printable with a 0.4 mm nozzle
+    sheet = sheet_faces(V, F, h)
+    r = plate_radius(h)
+    band = max(3 * h, r + 2 * h)
+    SF = F[sheet]
+    lo = V.min(0) - band - h
+    n = np.ceil((V.max(0) + band + h - lo) / h).astype(int) + 1
     X, Y = np.meshgrid(lo[0] + h * np.arange(n[0]), lo[1] + h * np.arange(n[1]), indexing="xy")   # x fastest, as igl wants
     layer, per = np.c_[X.ravel(), Y.ravel()], n[0] * n[1]
     verts, faces, base = [], [], 0
     for z0 in range(0, n[2] - 1, slab):
         z = lo[2] + h * np.arange(z0, min(n[2], z0 + slab + 1))
         P = np.c_[np.tile(layer, (len(z), 1)), np.repeat(z, per)]
-        s, *_ = igl.signed_distance(P, V, F, SIGNED, -3 * h, 3 * h)
+        s, *_ = igl.signed_distance(P, V, F, SIGNED, -band, band)
         far = ~np.isfinite(s)                       # past the band igl gives no sign: the winding number does
-        s[far] = np.where(igl.fast_winding_number(V, F, P[far]) > 0.5, -3 * h, 3 * h)
+        s[far] = np.where(igl.fast_winding_number(V, F, P[far]) > 0.5, -band, band)
+        near = np.flatnonzero(np.abs(s) < r)        # only there can a sheet be nearer than r
+        if len(SF) and len(near):
+            d = np.sqrt(igl.point_mesh_squared_distance(P[near], V, SF)[0])
+            s[near] = np.minimum(s[near], d - r)
         # a grid point on the surface puts several vertices on it, and the weld below would merge them
         s = np.where(np.abs(s) < 1e-4 * h, np.where(s < 0, -1e-4 * h, 1e-4 * h), s)
         mv, mf, _ = igl.marching_cubes(s, P, int(n[0]), int(n[1]), len(z), 0.0)
@@ -114,6 +140,9 @@ def close_mesh(tris, h=None, slab=24):
     vol = np.bincount(comp, weights=np.einsum("ij,ij->i", out[:, 0], np.cross(out[:, 1], out[:, 2])) / 6)
     area = np.bincount(comp, weights=0.5 * np.linalg.norm(np.cross(out[:, 1] - out[:, 0], out[:, 2] - out[:, 0]), axis=1))
     keep = (np.linalg.norm(hi - lo, axis=1) >= 8 * h) & ((vol > 0) | (-2 * vol / area >= 2 * h))
+    # nothing floats in a print: a separate piece under 0.5 % of the volume is debris (a bubble between scan
+    # layers, a stray flap), not a part; if it was scanned surface the validator's detail check says so
+    keep &= (vol < 0) | (vol >= 0.005 * vol[vol > 0].sum())
     return out[keep[comp]]
 
 
