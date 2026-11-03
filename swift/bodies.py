@@ -192,7 +192,10 @@ def group(tris, pieces, groups, drop=(), rest="touching", splits=(), rings=(), r
             part[i] = None if outside.is_empty() else outside
             took.append(i)
         if not took_parts:
-            raise ValueError(f"cut {k} ({nm}): the knife reaches no kept solid")
+            on = [r.get("pieces") for r in rings if c.get("kind") == "ring" and r["id"] == c.get("ring")]
+            raise ValueError(f"cut {k} ({nm}): the knife reaches no kept solid"
+                             + (f" - ring {c.get('ring')} is in pieces {on[0]}, not {targets}: where that piece is a body of its own "
+                                "(a group), the ring is a body already and needs no cut" if on and on[0] else ""))
         hit = [x for x in extra if x[0] == nm]
         if hit:
             hit[0][1].extend(took_parts)

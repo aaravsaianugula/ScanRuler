@@ -518,8 +518,14 @@ class Workbench:
         info = write_step(self.organic_step, None, bodies=bodies)
         self._bodies(bodies, dropped, cuts)
         self.delivered = [(n, tri(b)) for n, b in bodies]
+        # a finder cut left out puts its part back in the piece it was fused to (Swift misread a picture: two gears back in Kurisu)
+        key = lambda c: (c.get("kind"), c.get("ring"), c.get("rod"))
+        lost = [c for c in (getattr(self, "proposal", None) or {}).get("cuts", []) if c.get("kind") in ("ring", "rod")
+                and key(c) not in {key(s) for s in splits}]
+        warn = [f"WARNING: the finders' cut {c['name']} ({c['kind']} {c.get('ring', c.get('rod'))}) is left out: that part is inside the body "
+                f"of piece {c['pieces']} again. Keep it in cuts unless the picture shows it is no separate part" for c in lost]
         return "\n".join(([f"REFUSED the split: bodies {', '.join(map(str, broken[:8]))} came out open or inside out, so the solid "
-                           "is written as one body"] if broken else []) + [f"STEP {self.organic_step.name}: {info['products']} bodies, {info['solids']} solids, {info['voids']} cavities; "
+                           "is written as one body"] if broken else []) + warn + [f"STEP {self.organic_step.name}: {info['products']} bodies, {info['solids']} solids, {info['voids']} cavities; "
                           f"picture: {self.work / 'bodies.png'} (view_image: is each part one body, and nothing of one in another?)"]
                          + [f"  {b['name']}: {b['volume']} mm3, box {b['lo']}..{b['hi']}" for b in self.bodies]
                          + [f"  {c['name']}: {c['kind']} cut from pieces {c['pieces']}, {c['volume']} mm3"
