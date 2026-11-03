@@ -140,7 +140,23 @@ def main():
         planes, cylinders, flat = surface_shares(wb.input)
         organic = planes < 0.4 and cylinders < 0.45
         log(f"[run] surface on planes {planes:.2f}, on cylinders {cylinders:.2f}: " + ("free-form (organic)" if organic else "engineered"))
-        if a.mode == "auto" and organic:
+        mech_step, report = None, ""
+        if a.mode in ("cad", "scan") or (a.mode == "auto" and not organic):
+            # deterministic first: planes, cylinders, cones and rounds read off the mesh into one exact solid; a pass
+            # needs neither the exact-reading analyzer (minutes on a dense scan) nor Swift
+            phase("mech", "Fitting planes, cylinders, cones and rounds")
+            try:
+                mech_step, mrep = wb.mech(log=log)
+                if mech_step:
+                    report = (f"Mech route: {mrep['solid']['faces']} analytic faces {mrep['solid']['kinds']}, "
+                              f"{mrep['step_kb']} kB, validated against the mesh (scan mode).")
+                    emit("validation", result=wb.last_validation, summary=summary(wb.last_validation))
+            except Exception:
+                log("[run] the mech route failed:\n" + traceback.format_exc())
+        if mech_step:
+            analysis = f"{n_tris} triangles, engineered: read by the mech route\n\n\n"
+            mode = a.mode if a.mode != "auto" else "scan"
+        elif a.mode == "auto" and organic:
             analysis = f"{n_tris} triangles, free-form: {planes:.0%} of the surface on planes, {cylinders:.0%} on cylinders of one axis\n\n\n"
             mode = "organic"
         elif n_tris > 400_000 and a.mode != "cad":
@@ -154,10 +170,12 @@ def main():
         log(analysis)
         emit("mode", mode=mode)
         log(f"[run] mode: {mode}")
-        report, failed, agent = "", True, None
+        failed, agent = not mech_step, None
         paged, tried_organic = a.live, False
 
-        if mode == "cad":
+        if mech_step:
+            pass
+        elif mode == "cad":
             phase("autopilot", "Exact reading: slabs, holes, blends")
             files, _ = first_pass(wb, log=lambda s: log(clip(s, 3000)))
             phase("check", "Validating against the mesh")
@@ -224,7 +242,8 @@ def main():
         if not failed and r and r["verdict"] == "PASS" and organic:
             status, step = "PASS", wb.organic_step
         elif not failed and r and r["verdict"] == "PASS":
-            log(wb.deliver(stl.stem))
+            if not mech_step:
+                log(wb.deliver(stl.stem))
             status, step = "PASS", work / f"{stl.stem}_CAD.step"
         elif organic:
             status, step = "NOT VALIDATED", wb.organic_step

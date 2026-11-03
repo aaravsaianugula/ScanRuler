@@ -256,7 +256,21 @@ class Workbench:
         self._bodies([(stem, read_stl(self.reduced))], [], [])
         return "\n".join(report)
 
-    def smooth(self, patches=3000):
+    def mech(self, log=print):
+        """The mech route (swift/mech.py, no page, no Swift): the input read as planes, cylinders, cones and rounds,
+        built into one exact solid, written to <stem>_CAD.step and judged by the validator's scan mode against
+        the input. Returns (step or None, report); a failing STEP is not left behind."""
+        import mech
+        out = self.work / f"{self.stl.stem}_CAD.step"
+        rep = mech.run(self.input, out, log=log)
+        self.last_validation = rep.get("validation")
+        (self.work / "mech.json").write_text(json.dumps(rep, indent=1, default=str))
+        if rep["verdict"] != "PASS":
+            out.unlink(missing_ok=True)
+            return None, rep
+        return out, rep
+
+    def smooth(self, patches=3000, **opts):
         """The delivered bodies as smooth CAD surfaces (autosurface: four-sided B-spline patches with shared
         edges, one watertight solid per body), written to <stem>_solid.step and judged like the faceted solid:
         the STEP read back and meshed by OCCT, through the validator against the original mesh. Returns
@@ -273,7 +287,7 @@ class Workbench:
         for name, tris in getattr(self, "delivered", None) or []:
             v, f = indexed(np.asarray(tris, float))
             bodies.append((name, surface(v, f, patches * len(f) // max(sum(len(t) for _, t in self.delivered), 1) + 1,
-                                         tol=tol, judge=lambda sf: kernel_rejects(sf, self.work / "_kernel_check.step"),
+                                         **{"tol": tol, **opts}, judge=lambda sf: kernel_rejects(sf, self.work / f"_kernel_check_{self.stl.stem}.step"),
                                          log=lambda s, n=name: report.append(f"  {n}: {s}"))))
         if not bodies:
             return None, "no delivered solid to surface", None
