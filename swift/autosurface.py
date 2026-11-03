@@ -266,6 +266,10 @@ def surface(V, F, patches=3000, n=6, bend=10.0, tol=0.1, rounds=6, lam=0.1, span
         or None when 150 tries do not get there."""
         merges = 0
         for tries in range(150):
+            # every piece keeps a seed: a piece left without one (its seed dropped as a sliver or a lone face)
+            # has no cell to grow and its faces would land in some cell of another piece
+            have = set(comp[seeds].tolist()) if seeds else set()
+            seeds = seeds + [int(np.flatnonzero(comp == pc)[0]) for pc in np.unique(comp) if pc not in have]
             if rnd == 0 and tries < 2:          # centred once: later rounds only add seeds, so cells
                 seeds = list(dict.fromkeys(centred(G, TT, grow(G, seeds)[0], seeds)))   # away from a miss stay
             lab, dist = grow(G, seeds, TT)
