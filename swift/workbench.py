@@ -501,6 +501,16 @@ class Workbench:
             return "no organic solid yet: run the organic route first"
         whole = read_stl(self.whole)
         self.pieces = self.pieces or survey(whole, self.grid)
+        # the finders' ring and rod cuts stay whatever the call says: Swift, misreading a picture, left Kurisu's two fused
+        # gears in the figure even when warned. A cut of a piece no group keeps is not added
+        key = lambda c: (c.get("kind"), c.get("ring"), c.get("rod"))
+        have, kept_ids = {key(s) for s in splits}, {i for g in groups for i in g.get("pieces", [])}
+        names = {str(g.get("name", "")).strip() for g in groups}
+        found = (getattr(self, "proposal", None) or {}).get("cuts", [])
+        lost = {c["name"] for c in found if c.get("kind") in ("ring", "rod") and key(c) not in have and set(c["pieces"]) <= kept_ids}
+        added = [dict(c, name=c["name"] + (" (finder)" if c["name"] in names else "")) for c in found
+                 if c["name"] in lost and c.get("kind") != "plane"]
+        splits = list(splits) + added
         try:
             bodies, kept, dropped, cuts = group(whole, self.pieces, groups, drop, rest, splits, getattr(self, 'rings', None) or (),
                                                 getattr(self, 'rods', None) or ())
@@ -518,12 +528,8 @@ class Workbench:
         info = write_step(self.organic_step, None, bodies=bodies)
         self._bodies(bodies, dropped, cuts)
         self.delivered = [(n, tri(b)) for n, b in bodies]
-        # a finder cut left out puts its part back in the piece it was fused to (Swift misread a picture: two gears back in Kurisu)
-        key = lambda c: (c.get("kind"), c.get("ring"), c.get("rod"))
-        lost = [c for c in (getattr(self, "proposal", None) or {}).get("cuts", []) if c.get("kind") in ("ring", "rod")
-                and key(c) not in {key(s) for s in splits}]
-        warn = [f"WARNING: the finders' cut {c['name']} ({c['kind']} {c.get('ring', c.get('rod'))}) is left out: that part is inside the body "
-                f"of piece {c['pieces']} again. Keep it in cuts unless the picture shows it is no separate part" for c in lost]
+        warn = [f"KEPT the finders' cut {c['name']} ({c['kind']} {c.get('ring', c.get('rod'))}) the call left out: that part stays a body "
+                "of its own (to name it, cut the same ring or rod under the name you want)" for c in added if c.get("kind") != "box"]
         return "\n".join(([f"REFUSED the split: bodies {', '.join(map(str, broken[:8]))} came out open or inside out, so the solid "
                            "is written as one body"] if broken else []) + warn + [f"STEP {self.organic_step.name}: {info['products']} bodies, {info['solids']} solids, {info['voids']} cavities; "
                           f"picture: {self.work / 'bodies.png'} (view_image: is each part one body, and nothing of one in another?)"]
