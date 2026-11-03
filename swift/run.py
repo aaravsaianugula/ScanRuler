@@ -2,7 +2,7 @@
 """Reverse-engineer a mesh/scan into validated CAD with Swift 1.5.
 
     python swift/run.py part.stl [--mode auto|cad|scan|organic] [--work DIR] [--max-turns 60] [--no-swift]
-                                 [--headless-browser] [--live] [--events]
+                                 [--headless-browser] [--live] [--events] [--smooth]
 
 auto: a free-form model (figurine, sculpture: few planes or cylinders) goes the organic way - repaired into a
 closed solid, written as a faceted STEP; a CAD-exported mesh (exact surfaces) goes the exact-reading way; a real scan is measured in the
@@ -109,6 +109,7 @@ def main():
     ap.add_argument("--headless-browser", action="store_true", help="scan mode: do not show the ScanRuler window")
     ap.add_argument("--live", action="store_true", help="hand the ScanRuler page to the host (desktop app) as the live view")
     ap.add_argument("--events", action="store_true", help="JSON lines on stdout for the desktop app")
+    ap.add_argument("--smooth", action="store_true", help="organic: also try smooth B-spline surfaces (~15 min on a figurine; not passing on real scans yet)")
     a = ap.parse_args()
 
     stl = Path(a.stl).resolve()
@@ -258,9 +259,10 @@ def main():
         else:
             status, step = "NOT VALIDATED", work / "best_attempt_CAD.step"
         # the CAD deliverable: the solid as smooth B-spline surfaces (not a triangle a face) when they pass the
-        # same validator against the original mesh; else the faceted solid stays the deliverable
+        # same validator against the original mesh; else the faceted solid stays the deliverable. Asked for only:
+        # on Kurisu it took half the run and failed (detail, one face OCCT rejects), as it has on every real scan so far
         smooth_r = None
-        if status == "PASS" and organic:
+        if status == "PASS" and organic and a.smooth:
             phase("surface", "Fitting smooth CAD surfaces over the solid")
             try:
                 smooth, srep, smooth_r = wb.smooth()
