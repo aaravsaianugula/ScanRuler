@@ -36,6 +36,18 @@ on_sphere = (tid < len(sphere)) | (tid >= len(scan) - len(void))
 assert on[on_sphere].mean() > 0.97 and on[~on_sphere].mean() < 0.05, (on[on_sphere].mean(), on[~on_sphere].mean())
 print("ok", len(solid), "triangles, volume", round(v, 1))
 
+# an open relief facing up (a raised block keeps it so) with a narrow well in front: in the well the winding
+# number is -0.7 and igl's sign (by |w|) said inside, filling it; the solid is a plate along the sheet
+import igl  # noqa: E402
+from organic_solid import indexed  # noqa: E402
+X, Y = np.meshgrid(np.linspace(-10, 10, 81), np.linspace(-10, 10, 81), indexing="ij")
+P = np.stack([X, Y, np.where((np.abs(X + 4) < 4.1) & (np.abs(Y) < 4.1), 6.0, np.where((np.abs(X - 5) < 0.9) & (np.abs(Y) < 0.9), -8.0, 0.0))], -1)
+q = np.stack([P[:-1, :-1], P[1:, :-1], P[1:, 1:], P[:-1, 1:]], 2).reshape(-1, 4, 3)
+plate = close_mesh(np.concatenate([q[:, [0, 1, 2]], q[:, [0, 2, 3]]]), h=0.3, handles=0)
+w = igl.fast_winding_number(*indexed(plate), np.array([[5, 0, -4.0], [8, 8, 0], [-4, 0, 3]]))
+assert edge_counts(plate) == (0, 0) and w.round().tolist() == [0, 1, 1], w
+print("ok relief well stays empty")
+
 # reduced, it stays closed, no wall cuts through another and the cavity still faces in
 from organic_solid import indexed, reduce_mesh, self_intersecting  # noqa: E402
 small = reduce_mesh(solid, 3000)

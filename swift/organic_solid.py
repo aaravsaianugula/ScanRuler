@@ -74,11 +74,25 @@ def grid_for(tris):
 def sheet_faces(V, F, h):
     """Which faces of an oriented scan are thin surface with no solid behind them (a face, a hand, hair: an open
     sheet): the winding number a step and a half behind the face is not clearly inside. Surface with solid
-    behind it bounds the body already, however noisy in front (a fold's outer layer), and is not thickened."""
+    behind it bounds the body already, however noisy in front (a fold's outer layer), and is not thickened.
+    One face's test flickers on noisy surface that does bound the body (its normal off by the noise, a thin
+    spot), and each such face got a plate standing 0.4 mm off the scan: it is asked along its own and its
+    smoothed normal, and a face that says sheet is one only when most of the surface within 2h does (Frieren:
+    45 % of the measured scan lay under plates, 8 % so; relief_sheet's real sheets stay). The vote only takes
+    sheet off: giving it to bounding faces among sheets buried them under a plate (relief_sheet p99 0.21)."""
+    from scipy.sparse import csr_matrix
+    from scipy.spatial import cKDTree
     t = V[F]
+    c = t.mean(1)
     nrm = np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0])
-    nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-20
-    return igl.fast_winding_number(V, F, t.mean(1) - 1.5 * h * nrm) <= 0.75
+    area = 0.5 * np.linalg.norm(nrm, axis=1)
+    nrm /= 2 * area[:, None] + 1e-20
+    ns = np.nan_to_num(igl.per_vertex_normals(V, F))[F].mean(1)
+    ns /= np.linalg.norm(ns, axis=1, keepdims=True) + 1e-20
+    raw = (igl.fast_winding_number(V, F, c - 1.5 * h * nrm) <= 0.75) & (igl.fast_winding_number(V, F, c - 1.5 * h * ns) <= 0.75)
+    i, j = cKDTree(c).query_pairs(2 * h, output_type="ndarray").T
+    near = csr_matrix((np.ones(2 * len(i)), (np.r_[i, j], np.r_[j, i])), shape=(len(F), len(F)))
+    return raw & (near @ (area * raw) + area * raw >= 0.5 * (near @ area + area))
 
 
 def plate_radius(h):
@@ -96,11 +110,13 @@ def close_mesh(tris, h=None, slab=24, handles=3, log=lambda s: print(s, file=sys
     V, F = indexed(np.concatenate(orient(pieces(tris))))
     # thin scanned surface with no clean inside and outside (hair, a cloak's edge, a scan's open flaps): the
     # winding number hovers at 1/2 beside it and the closing comes out as lace (Kurisu: 1522 tunnels). Such
-    # surface becomes a plate, at least 0.8 mm thick, printable with a 0.4 mm nozzle
+    # surface becomes a plate, at least 0.8 mm thick, printable with a 0.4 mm nozzle, centred on it: one laid
+    # behind it (offset along vertex normals) buried stacked hair layers (Kurisu) and, where those normals
+    # scatter on a noisy sheet, fell short of the scan (relief_sheet). It reaches only where the sheet is the
+    # nearest scan: where it meets surface that bounds the body it stops there, half a cell over it, not 0.4 mm
     sheet = sheet_faces(V, F, h)
     r = plate_radius(h)
     band = max(3 * h, r + 2 * h)
-    SF = F[sheet]
     lo = V.min(0) - band - h
     n = np.ceil((V.max(0) + band + h - lo) / h).astype(int) + 1
     X, Y = np.meshgrid(lo[0] + h * np.arange(n[0]), lo[1] + h * np.arange(n[1]), indexing="xy")   # x fastest, as igl wants
@@ -109,21 +125,34 @@ def close_mesh(tris, h=None, slab=24, handles=3, log=lambda s: print(s, file=sys
     for z0 in range(0, n[2], slab):
         z = lo[2] + h * np.arange(z0, min(n[2], z0 + slab))
         P = np.c_[np.tile(layer, (len(z), 1)), np.repeat(z, per)]
-        s, *_ = igl.signed_distance(P, V, F, SIGNED, -band, band)
+        s, I, C, _ = igl.signed_distance(P, V, F, SIGNED, -band, band)
         far = ~np.isfinite(s)                       # past the band igl gives no sign: the winding number does
         s[far] = np.where(igl.fast_winding_number(V, F, P[far]) > 0.5, -band, band)
-        near = np.flatnonzero(np.abs(s) < r)        # only there can a sheet be nearer than r
-        if len(SF) and len(near):
-            d = np.sqrt(igl.point_mesh_squared_distance(P[near], V, SF)[0])
-            s[near] = np.minimum(s[near], d - r)
+        # igl signs by |w|: in front of an open sheet's hollow (a relief's dip) w nears -1 and it says inside
+        neg = np.flatnonzero(~far & (s < 0))
+        s[neg[igl.fast_winding_number(V, F, P[neg]) <= 0.5]] *= -1
+        # and s is d (1 - 2|w|), not d: where w stays near 1/2 beside the surface (a crevice, a noisy layer)
+        # marching cubes put it up to half a cell off the scan (Frieren: 5-10 mm2 patches 0.1 mm proud)
+        s[~far] = np.copysign(np.linalg.norm(P[~far] - C[~far], axis=1), s[~far])
+        near = np.flatnonzero(np.abs(s) < r)
+        on = near[sheet[I[near]]]
+        s[on] = np.minimum(s[on], np.abs(s[on]) - r)
+        # other scan nearer: the plate tapers to half a cell there, so its rim holds (Frieren: 141 tunnels
+        # cut off sheer, 109 so; a whole cell gave 58 but stood proud of the scan, detail lost)
+        rest = near[~sheet[I[near]]]
+        if len(rest) and sheet.any():
+            s[rest] = np.minimum(s[rest], np.sqrt(igl.point_mesh_squared_distance(P[rest], V, F[sheet])[0]) - h / 2)
         # a grid point on the surface puts several vertices on it, and the weld below would merge them
         s = np.where(np.abs(s) < 1e-4 * h, np.where(s < 0, -1e-4 * h, 1e-4 * h), s)
         grid[z0:z0 + len(z)] = s.reshape(len(z), n[1], n[0])
     if handles:
         import topology
-        add, cut = topology.simplify(grid < 0, handles, log=log)
-        g = grid.reshape(-1)
-        g[add], g[cut] = -0.5 * h, 0.5 * h         # a plug or a cut about a cell thick
+        try:
+            add, cut = topology.simplify(grid < 0, handles, log=log)
+            g = grid.reshape(-1)
+            g[add], g[cut] = -0.5 * h, 0.5 * h         # a plug or a cut about a cell thick
+        except MemoryError:     # its labels take ~3x the grid: a solid with its small handles beats none
+            log(f"[organic] not enough memory to take small handles off a {grid.size / 1e6:.0f} M-point grid: kept as closed")
     verts, faces, base = [], [], 0
     for z0 in range(0, n[2] - 1, slab):
         z = lo[2] + h * np.arange(z0, min(n[2], z0 + slab + 1))

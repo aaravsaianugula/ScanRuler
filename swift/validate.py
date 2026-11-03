@@ -381,7 +381,7 @@ def tunnels(tris):
     return max(0, (2 * shells - (len(np.unique(f)) - edges + len(f))) // 2)
 
 
-def solid_gate(scan, bodies, grid, noise, points=3_000_000, seed=0):
+def solid_gate(scan, bodies, grid, noise, points=3_000_000, seed=0, sheet=None):
     """What a slicer fills, against what the scan holds - the bodies exactly as written for it.
     - every body a closed shell facing out (a slicer drops an open or inside-out part: nothing printed there);
     - the scan's volume is solid: points clearly inside the scan (winding number) and away from its surface
@@ -399,7 +399,7 @@ def solid_gate(scan, bodies, grid, noise, points=3_000_000, seed=0):
     rng = np.random.default_rng(seed)
     P = lo + rng.random((points, 3)) * (hi - lo)
     cell = float(np.prod(hi - lo)) / points
-    thin = V[F][sheet_faces(V, F, grid)]
+    thin = V[F][sheet_faces(V, F, grid) if sheet is None else sheet]
     thin_mm2 = float(0.5 * np.linalg.norm(np.cross(thin[:, 1] - thin[:, 0], thin[:, 2] - thin[:, 0]), axis=1).sum())
     S = sample_area(thin, int(min(300_000, max(1000, thin_mm2 / 0.04))), seed=seed)[0] if len(thin) else np.zeros((0, 3))   # 5 per mm2
     in_p, in_s, holes = np.zeros(points, bool), np.zeros(len(S), bool), 0
@@ -481,7 +481,16 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
     per_a, per_b = area(R0) / len(pr), area(R) / len(pb)
     buried = (sg_ar < 0) & (d_ar > tolr["max"])
     buried_mm2 = float(buried.sum() * per_a)
-    pa, d_ar, sg_ar = pa[~buried], d_ar[~buried], sg_ar[~buried]
+    # thin surface the closing made a plate (organic_solid.sheet_faces: a wall thinner than 1.5 grid steps, a
+    # flap) lies within it by design, up to the plate's half thickness under the solid's face, as the solid
+    # gate allows plates outside the scan: reported, not measured. Off the plate (outside the solid, deeper
+    # in) it counts
+    from organic_solid import indexed as ix, plate_radius, sheet_faces
+    g = grid or spacing
+    sheet = sheet_faces(*ix(R0), g)
+    plated = sheet[tr][scanned & bounding] & (sg_ar < 0) & (d_ar <= plate_radius(g) + tolr["p99"]) & ~buried
+    plated_mm2 = float(plated.sum() * per_a)
+    pa, d_ar, sg_ar = pa[~buried & ~plated], d_ar[~buried & ~plated], sg_ar[~buried & ~plated]
     s_ar, s_ba = stats(d_ar), stats(d_ra[supported])
     # each sample stands for its share of its surface: past-max area and bands in mm2
     measured_a, measured_b = len(pa) * per_a, int(supported.sum()) * per_b
@@ -504,7 +513,7 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
     lost.sort(key=lambda c: -c["area_mm2"])
     detail_band = max(1.0, 1e-4 * measured_a)
     # the bodies as written for the slicer, against the scan's volume (solid_gate)
-    gate = solid_gate(R0, bodies or [("solid", R)], grid or spacing, noise)
+    gate = solid_gate(R0, bodies or [("solid", R)], g, noise, sheet=sheet)
     checks = {
         "closed": open_e == 0 and nonman == 0,
         "rms": max(s_ar["rms"], s_ba["rms"]) <= tolr["rms"],
@@ -526,7 +535,7 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
         removed_area_mm2=round(area(A[~kept]), 1),
         filled_area_mm2=round(float((~supported).mean()) * area(R), 1),
         sheet_area_mm2=round(float((scanned & ~bounding).mean()) * area(R0), 1),
-        buried_mm2=round(buried_mm2, 1),
+        buried_mm2=round(buried_mm2, 1), plated_mm2=round(plated_mm2, 1),
         sheet_share=round(float((scanned & ~bounding).sum() / max(1, scanned.sum())), 4),
         past_max_mm2={k: round(v, 1) for k, v in past.items()},
         past_max_share=dict(scan=round(past["scan"] / max(measured_a, 1e-9), 5), solid=round(past["solid"] / max(measured_b, 1e-9), 5)),
@@ -548,6 +557,7 @@ def summary(r):
             f"filled holes {r['filled_area_mm2']} mm2, removed islands {r['removed_area_mm2']} mm2, "
             f"single sheets {r['sheet_area_mm2']} mm2 ({100 * r['sheet_share']:.1f} % of the scan: no closed solid lies on them, not measured), "
             f"inner scan layers buried in the solid {r.get('buried_mm2', 0)} mm2 (filled, not measured), "
+            f"thin surface made a plate {r.get('plated_mm2', 0)} mm2 (within it, not measured), "
             f"gaps bridged by the closing {r.get('bridged_mm2', 0)} mm2 (no scan there, not measured)",
             f"past max {r['tolerances']['max']:.3f}: scan {r['past_max_mm2']['scan']} mm2 ({100 * r['past_max_share']['scan']:.3f} %), "
             f"solid {r['past_max_mm2']['solid']} mm2 ({100 * r['past_max_share']['solid']:.3f} %) of 0.1 % allowed; "
