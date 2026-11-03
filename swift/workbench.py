@@ -419,13 +419,19 @@ class Workbench:
         sel, sel_s = near_of(t), near_of(v[f])
         if sel.sum() < 50 or sel_s.sum() < 50:
             return f"nothing of the solid within {within} mm of {near}"
-        rods, rings = find_rods(v[f][sel_s], of[sel_s], solid=v[f]), find(t[sel], ot[sel])
+        # rings on the solid too: a thin gear fused to the figure breaks into sub-60 mm2 patches on the finer, noisier
+        # look copy (Kurisu: 2 of 5 gears seen only on the solid)
+        rods = find_rods(v[f][sel_s], of[sel_s], solid=v[f])
+        rings = find(t[sel], ot[sel]) + (find(v[f][sel_s], of[sel_s]) if t is not v[f] else [])
         self.rods, self.rings = getattr(self, "rods", None) or [], getattr(self, "rings", None) or []
         same_rod = lambda a, b: abs(np.dot(a["axis"], b["axis"])) > 0.995 and abs(a["radius"] - b["radius"]) < 0.2 * b["radius"] and \
             np.linalg.norm(np.cross(np.subtract(a["centre"], b["centre"]), b["axis"])) < b["radius"]
         same_ring = lambda a, b: abs(np.dot(a["normal"], b["normal"])) > 0.995 and np.linalg.norm(np.subtract(a["centre"], b["centre"])) < 2
         new_rods = [r for r in rods if not any(same_rod(r, o) for o in self.rods)]
-        new_rings = [r for r in rings if not any(same_ring(r, o) for o in self.rings)]
+        new_rings = []
+        for r in rings:
+            if not any(same_ring(r, o) for o in self.rings + new_rings):
+                new_rings.append(r)
         for r in new_rods:
             r["id"] = len(self.rods); self.rods.append(r)
         for r in new_rings:

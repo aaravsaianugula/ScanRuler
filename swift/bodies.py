@@ -174,10 +174,21 @@ def group(tris, pieces, groups, drop=(), rest="touching", splits=(), rings=(), r
             big = comps[0].volume() if comps else 0.0
             moved = [x for x in comps if (x.volume() < big or big <= 0.05 * inside.volume()) and x.volume() < 0.05 * inside.volume()
                      and inside.min_gap(x, 0.05) < 0.01]
-            for x in moved:         # parts of their own, touching what it took: a union with a sliver of noise makes junk
+            # joined to what it took: two solids touching face to face weld non-manifold (Kurisu's leg gear); the union's
+            # zero-volume junk shells are left out by _mesh; a bit whose union pinches an edge stays with the rest
+            u = _sum([inside, *moved]) if moved else inside
+            if moved and not _clean(u):
+                u = inside
+                for x in moved:
+                    if _clean(u + x):
+                        u = u + x
+                    else:
+                        moved = [y for y in moved if y is not x]
+            for x in moved:
                 torn += x.volume()
                 outside = outside - x
-            took_parts += [inside, *moved]
+            inside = u
+            took_parts.append(inside)
             part[i] = None if outside.is_empty() else outside
             took.append(i)
         if not took_parts:
@@ -256,10 +267,17 @@ def _mesh(parts):
     shells - two solids touching at an edge would share it four ways (non-manifold)."""
     vs, fs, base = [], [], 0
     for x in parts:
-        for t, dec in ([(x, 6)] if isinstance(x, np.ndarray) else [(_tris(c), 6) for c in x.decompose()]):
+        for t, dec in ([(x, 6)] if isinstance(x, np.ndarray) else [(_tris(c), 6) for c in x.decompose() if abs(c.volume()) > 1e-6]):
             v, f = indexed(t, dec)
             vs.append(v); fs.append(f + base); base += len(v)
     return np.concatenate(vs), np.concatenate(fs).astype(np.int64)
+
+
+def _clean(m):
+    """m as _mesh writes it is closed and manifold (every edge in two triangles)."""
+    f = _mesh([m])[1]
+    e = np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), 1)
+    return bool((np.unique(e, axis=0, return_counts=True)[1] == 2).all())
 
 
 def _tris(m):

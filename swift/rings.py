@@ -147,8 +147,10 @@ def find(tris, of=None):
         if not up or not down:
             continue
         m1, m2 = np.concatenate([h["m"] for h in up]), np.concatenate([h["m"] for h in down])
-        d1 = float(np.average([h["d"] for h in up], weights=[h["a"] for h in up]))
-        d2 = float(np.average([h["d"] for h in down], weights=[h["a"] for h in down]))
+        # the ring's faces: the outermost planes of its patches along n (a face's patches can face either way where
+        # the scan folds: Kurisu's fused gear read 1.8 mm thick from up-vs-down averages, 4.3 from the planes)
+        lv = [h["d"] if h["n"] @ n > 0 else -h["d"] for h in g]
+        d1, d2 = max(lv), -min(lv)
         gap = d1 + d2
         if not 0.5 < gap < 15:
             continue
