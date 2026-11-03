@@ -255,13 +255,24 @@ def match_prims(src, dst, min_area):
 
 def estimate_noise(tris, spacing):
     """The scan's noise sigma: the median local-plane residual (PCA over ~1.5 mm patches) of its surface.
-    Curvature inflates it on rounds, so the median over the whole part is used."""
-    pts = sample(tris, spacing)
+    Curvature inflates it on rounds, so the median over the whole part is used. A patch is fitted on its own
+    connected piece only: shells stacked a fraction of a mm apart (a game model's hair cards and outline shells)
+    are no noise, and read across them Kurisu, a clean mesh, came out at 0.23 mm and passed a smeared face."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    pts, tid = sample(tris, spacing, return_tri=True)
+    _, inv = np.unique(np.round(tris.reshape(-1, 3), 6), axis=0, return_inverse=True)
+    f = inv.reshape(-1, 3)
+    nv = int(f.max()) + 1
+    piece = connected_components(coo_matrix((np.ones(3 * len(f)), (f.ravel(), np.roll(f, 1, axis=1).ravel())), shape=(nv, nv)),
+                                 directed=False)[1][f[:, 0]][tid]
     tree = cKDTree(pts)
     rng = np.random.default_rng(0)
-    probe = pts[rng.choice(len(pts), min(4000, len(pts)), replace=False)]
+    pick = rng.choice(len(pts), min(4000, len(pts)), replace=False)
     sig = []
-    for nb in tree.query_ball_point(probe, r=max(1.5, 4 * spacing)):
+    for k, nb in zip(pick, tree.query_ball_point(pts[pick], r=max(1.5, 4 * spacing))):
+        nb = np.asarray(nb)
+        nb = nb[piece[nb] == piece[k]]
         if len(nb) < 12:
             continue
         x = pts[nb] - pts[nb].mean(0)

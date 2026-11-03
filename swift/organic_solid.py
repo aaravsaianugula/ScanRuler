@@ -27,6 +27,9 @@ def pieces(tris):
     return np.split(tris[order], np.flatnonzero(np.diff(comp[order])) + 1)
 
 
+CAVITY_CLEAR = 0.5      # mm a sealed void's wall keeps from the outside at least
+
+
 def orient(parts):
     """Every piece facing out - exporters and scan merges mix windings, and the winding number needs it.
     A piece that encloses volume faces out when its volume about its own centre is positive, unless it lies
@@ -44,7 +47,10 @@ def orient(parts):
             return False
         V, F = indexed(np.concatenate(rest))
         p = parts[i].reshape(-1, 3)
-        return bool((igl.fast_winding_number(V, F, p[rng.choice(len(p), min(20, len(p)), replace=False)]) > 0.5).all())
+        p = p[rng.choice(len(p), min(20, len(p)), replace=False)]
+        # and clear of their surface: a shell just under another's skin (an anime model's face mask under the head's)
+        # is a layer of the outside, not a void - kept inside out it took the face out of Kurisu's solid
+        return bool((igl.fast_winding_number(V, F, p) > 0.5).all() and np.sqrt(igl.point_mesh_squared_distance(p, V, F)[0]).min() > CAVITY_CLEAR)
     out = [t[:, ::-1] if ok and vol(t) < 0 and not cavity(i) else t for i, (t, ok) in enumerate(zip(parts, sure))]
     if not any(sure) or all(sure):
         return out
