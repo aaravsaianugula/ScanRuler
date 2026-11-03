@@ -9,7 +9,7 @@ Desktop app for this fork: drop in a scan or CAD-exported STL. You get a STEP fi
 
 ## Requirements
 - This checkout, built: `npm ci && npm --prefix mcp ci && npm run build && npm run build:engine` in the repo root.
-- Python 3 with numpy, scipy and matplotlib (the app looks for `../.venv` next to the checkout; you can set the path in Settings).
+- Python 3.12 with `swift/requirements.txt` installed (`python -m pip install -r swift/requirements.txt`; the app looks for `../.venv` next to the checkout; you can set the path in Settings). A run with a package missing stops at once and names it.
 - An OpenAI-compatible endpoint serving Swift 1.5. The default is the AI Gateway at `http://127.0.0.1:11434/v1`, model `swift-1.5-qwen3.8-27b`.
 
 ## Run

@@ -15,6 +15,7 @@ validator, and only a PASS is delivered as <part>_CAD.step; otherwise best_attem
           opening a browser: the desktop app shows it as the live view, CAD meshes included.
 """
 import argparse
+import importlib.util
 import json
 import sys
 import time
@@ -28,6 +29,9 @@ from agent import MODEL, Agent  # noqa: E402
 from autopilot import first_pass  # noqa: E402
 from validate import summary  # noqa: E402
 from workbench import Workbench, clip  # noqa: E402
+
+# module: pip package, for every route (the organic fallback closes any mesh: igl, pymeshlab; mech: OCP; bodies: manifold3d)
+NEEDS = {"scipy": "scipy", "matplotlib": "matplotlib", "igl": "libigl", "pymeshlab": "pymeshlab", "manifold3d": "manifold3d", "OCP": "cadquery-ocp"}
 
 
 def looks_like_cad(work):
@@ -125,12 +129,16 @@ def main():
 
     def phase(name, label):
         emit("phase", phase=name, label=label)
-        log(f"[run] phase {name}: {label}")
+        log(f"[run] phase {name}: {label} ({time.time() - t0:.0f} s in)")
 
     t0 = time.time()
     emit("start", stl=str(stl), work=str(work), model=MODEL, swift=not a.no_swift)
     wb = None
     try:
+        missing = [pip for mod, pip in NEEDS.items() if importlib.util.find_spec(mod) is None]
+        if missing:     # said up front, not as an ImportError an hour into a run
+            raise RuntimeError(f"Python packages missing in {sys.executable}: {' '.join(missing)}. Install them with: "
+                               f"\"{sys.executable}\" -m pip install -r \"{Path(__file__).with_name('requirements.txt')}\"")
         phase("open", "Opening ScanRuler")
         on_link = (lambda url: emit("page", url=url)) if a.live else None
         wb = Workbench(stl, work, page=a.live, on_link=on_link)
