@@ -12,11 +12,19 @@ const headless = process.argv.includes('--headless') ? 'new' : false
 const browsers = [process.env.CHROME,
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
   'C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium']
-const executablePath = browsers.find((p) => p && existsSync(p))
-if (!executablePath) { console.error('no Edge or Chrome found: set CHROME'); process.exit(2) }
+const found = browsers.filter((p) => p && existsSync(p))
+if (!found.length) { console.error('no Edge or Chrome found: set CHROME'); process.exit(2) }
 
-const browser = await puppeteer.launch({ executablePath, headless, defaultViewport: null, protocolTimeout: 0,
-  args: ['--window-size=1500,950', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'] })
+// the next one when a browser will not start (an Edge build that exits at once, headless, with code 0)
+let browser
+for (const executablePath of found) {
+  try {
+    browser = await puppeteer.launch({ executablePath, headless, defaultViewport: null, protocolTimeout: 0,
+      args: ['--window-size=1500,950', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows'] })
+    break
+  } catch (e) { console.error(`${executablePath} did not start: ${e.message.split('\n')[0]}`) }
+}
+if (!browser) { console.error('no browser started: set CHROME to a working Chrome or Edge'); process.exit(2) }
 const [page] = await browser.pages()
 await page.evaluateOnNewDocument(() => {
   for (const [k, v] of [['scanruler.askstlunits', '0'], ['scanruler.beta', 'all'], ['scanruler.supportask', '0'], ['scanruler.agentdataok', '1']]) {
