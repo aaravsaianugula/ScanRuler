@@ -86,10 +86,12 @@ def plate_radius(h):
     return max(1.5 * h, 0.4)
 
 
-def close_mesh(tris, h=None, slab=24):
+def close_mesh(tris, h=None, slab=24, handles=3, log=lambda s: print(s, file=sys.stderr)):
     """Triangles of the closed surface (none when the scan encloses no volume: a single open sheet).
-    Pieces are turned to face out first. Marching cubes runs in z slabs sharing one layer (memory), and
-    the slabs are welded on it: both compute those vertices from the same grid values."""
+    Pieces are turned to face out first. The distance is sampled in z slabs (memory) into one grid; tunnels
+    and handles under about 2*handles cells across are taken off it (topology.py: a patch layout needs the
+    few a figurine really has, not the hundreds a noisy closing leaves); marching cubes runs in slabs sharing
+    one layer, welded on it: both compute those vertices from the same grid values."""
     h = h or grid_for(tris)
     V, F = indexed(np.concatenate(orient(pieces(tris))))
     # thin scanned surface with no clean inside and outside (hair, a cloak's edge, a scan's open flaps): the
@@ -103,9 +105,9 @@ def close_mesh(tris, h=None, slab=24):
     n = np.ceil((V.max(0) + band + h - lo) / h).astype(int) + 1
     X, Y = np.meshgrid(lo[0] + h * np.arange(n[0]), lo[1] + h * np.arange(n[1]), indexing="xy")   # x fastest, as igl wants
     layer, per = np.c_[X.ravel(), Y.ravel()], n[0] * n[1]
-    verts, faces, base = [], [], 0
-    for z0 in range(0, n[2] - 1, slab):
-        z = lo[2] + h * np.arange(z0, min(n[2], z0 + slab + 1))
+    grid = np.empty((n[2], n[1], n[0]), np.float32)
+    for z0 in range(0, n[2], slab):
+        z = lo[2] + h * np.arange(z0, min(n[2], z0 + slab))
         P = np.c_[np.tile(layer, (len(z), 1)), np.repeat(z, per)]
         s, *_ = igl.signed_distance(P, V, F, SIGNED, -band, band)
         far = ~np.isfinite(s)                       # past the band igl gives no sign: the winding number does
@@ -116,7 +118,17 @@ def close_mesh(tris, h=None, slab=24):
             s[near] = np.minimum(s[near], d - r)
         # a grid point on the surface puts several vertices on it, and the weld below would merge them
         s = np.where(np.abs(s) < 1e-4 * h, np.where(s < 0, -1e-4 * h, 1e-4 * h), s)
-        mv, mf, _ = igl.marching_cubes(s, P, int(n[0]), int(n[1]), len(z), 0.0)
+        grid[z0:z0 + len(z)] = s.reshape(len(z), n[1], n[0])
+    if handles:
+        import topology
+        add, cut = topology.simplify(grid < 0, handles, log=log)
+        g = grid.reshape(-1)
+        g[add], g[cut] = -0.5 * h, 0.5 * h         # a plug or a cut about a cell thick
+    verts, faces, base = [], [], 0
+    for z0 in range(0, n[2] - 1, slab):
+        z = lo[2] + h * np.arange(z0, min(n[2], z0 + slab + 1))
+        P = np.c_[np.tile(layer, (len(z), 1)), np.repeat(z, per)]
+        mv, mf, _ = igl.marching_cubes(grid[z0:z0 + len(z)].reshape(-1).astype(float), P, int(n[0]), int(n[1]), len(z), 0.0)
         verts.append(mv); faces.append(mf + base); base += len(mv)
     out = np.concatenate(verts)[np.concatenate(faces)]
     v, f = indexed(np.round(out, 9))               # weld the shared layers
