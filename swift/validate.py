@@ -378,18 +378,23 @@ def enclosing(tris, pts, eps=0.05):
     return (igl.fast_winding_number(v, f, pts - eps * nrm) > 0.75) & (igl.fast_winding_number(v, f, pts + eps * nrm) < 0.25)
 
 
-def tunnels(tris):
+def tunnels(tris, closed_only=False):
     """Handles through a closed mesh (its genus, summed over its shells): a figurine has a few, a thin surface
-    closed as lace has hundreds."""
+    closed as lace has hundreds. closed_only: summed over the shells with no open edge only (an open scan's
+    holes are no handles) - the topology a mesh brings of its own (a lattice, a chain, a pierced relief)."""
     _, inv = np.unique(np.round(tris.reshape(-1, 3), 6), axis=0, return_inverse=True)
     f = inv.reshape(-1, 3)
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
     nv = int(f.max()) + 1
-    shells = len(np.unique(connected_components(coo_matrix((np.ones(3 * len(f)), (f.ravel(), np.roll(f, 1, axis=1).ravel())),
-                                                           shape=(nv, nv)), directed=False)[1][f[:, 0]]))
-    edges = len(np.unique(np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1), axis=0))
-    return max(0, (2 * shells - (len(np.unique(f)) - edges + len(f))) // 2)
+    comp = connected_components(coo_matrix((np.ones(3 * len(f)), (f.ravel(), np.roll(f, 1, axis=1).ravel())),
+                                           shape=(nv, nv)), directed=False)[1]
+    e, n = np.unique(np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1), axis=0, return_counts=True)
+    keep = ~np.isin(comp, comp[e[n == 1, 0]]) if closed_only else np.ones(nv, bool)
+    fs, es = keep[f[:, 0]], keep[e[:, 0]]
+    shells = len(np.unique(comp[f[fs, 0]]))
+    chi = len(np.unique(f[fs])) - int(es.sum()) + int(fs.sum())
+    return max(0, (2 * shells - chi) // 2)
 
 
 def solid_gate(scan, bodies, grid, noise, points=3_000_000, seed=0, sheet=None):
@@ -424,6 +429,7 @@ def solid_gate(scan, bodies, grid, noise, points=3_000_000, seed=0, sheet=None):
         in_p |= igl.fast_winding_number(bv, bf, P) > 0.5
         if len(S):
             in_s |= igl.fast_winding_number(bv, bf, S) > 0.5
+    own = tunnels(scan, closed_only=True)       # the mesh's own handles (a lattice): no lace the closing made
     w = igl.fast_winding_number(V, F, P)
     d = np.sqrt(igl.point_mesh_squared_distance(P, V, F)[0])
     band = max(2 * noise + 0.05, 1.5 * grid)
@@ -431,13 +437,13 @@ def solid_gate(scan, bodies, grid, noise, points=3_000_000, seed=0, sheet=None):
     missing = held & ~in_p
     extra = (w < 0.2) & (d > plate_radius(grid) + band) & in_p
     scan_vol = max(float(held.sum()) * cell, 1e-9)
-    r = dict(bodies=per, tunnels=int(holes), scan_volume_mm3=round(scan_vol, 1),
+    r = dict(bodies=per, tunnels=int(holes), tunnels_allowed=150 + own, scan_volume_mm3=round(scan_vol, 1),
              missing_mm3=round(float(missing.sum()) * cell, 1), extra_mm3=round(float(extra.sum()) * cell, 1),
              thin_surface_mm2=round(thin_mm2, 1),
              thin_not_solid_share=round(float((~in_s).mean()) if len(S) else 0.0, 4))
     r["checks"] = dict(bodies_closed=all(b["ok"] for b in per), volume_solid=r["missing_mm3"] <= 1e-3 * scan_vol,
                        stays_in_scan=r["extra_mm3"] <= 1e-3 * scan_vol, thin_surface_solid=r["thin_not_solid_share"] <= 0.01,
-                       no_lace=holes <= 150)      # Kurisu: 79 with its gear rings fused on, 1522 when closed as lace
+                       no_lace=holes <= 150 + own)      # Kurisu: 79 with its gear rings fused on, 1522 when closed as lace
     return r
 
 
@@ -454,7 +460,9 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
     A, R0, R = read_stl(inp), read_stl(repaired), read_stl(reduced)
     size = float(np.linalg.norm(np.ptp(A.reshape(-1, 3), axis=0)))
     spacing = max(0.1, size / 600)
-    noise = estimate_noise(A, 0.3)          # 1.5 mm patches: wider ones measure a figurine's curvature, not its noise
+    # a closed manifold mesh is a model as given (a print file, a lattice), not raw scan: it has no noise to allow -
+    # its plane residual is the curvature of thin struts (a Voronoi car: 0.33 mm, loose enough to smear them)
+    noise = 0.0 if edge_counts(A) == (0, 0) else estimate_noise(A, 0.3)     # 1.5 mm patches: wider ones measure a figurine's curvature, not its noise
     area = lambda T: float(0.5 * np.linalg.norm(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), axis=1).sum())
     count = lambda T: int(min(max_points, max(1000, area(T) / spacing ** 2)))
     # a repaired triangle is the scan's own when the scan has that very triangle (filling adds new ones)
@@ -496,9 +504,11 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
     # flap) lies within it by design, up to the plate's half thickness under the solid's face, as the solid
     # gate allows plates outside the scan: reported, not measured. Off the plate (outside the solid, deeper
     # in) it counts
-    from organic_solid import indexed as ix, plate_radius, sheet_faces
+    from organic_solid import already_solid, indexed as ix, plate_radius, sheet_faces
     g = grid or spacing
-    sheet = sheet_faces(*ix(R0), g)
+    # a scan that is a closed solid already was delivered as it is: a thin wall of it bounds volume, no open
+    # sheet to plate (judged as one, its own surface points sit at winding number 1/2 and flicker)
+    sheet = np.zeros(len(R0), bool) if already_solid(R0) else sheet_faces(*ix(R0), g)
     plated = sheet[tr][scanned & bounding] & (sg_ar < 0) & (d_ar <= plate_radius(g) + tolr["p99"]) & ~buried
     plated_mm2 = float(plated.sum() * per_a)
     pa, d_ar, sg_ar = pa[~buried & ~plated], d_ar[~buried & ~plated], sg_ar[~buried & ~plated]
@@ -576,7 +586,7 @@ def summary(r):
             *([f"detail vs the original mesh (local mean deviation past {r['detail']['tol']:.3f}): largest area lost "
                f"{r['detail']['largest_lost_mm2']} mm2 of {r['detail']['allowed_mm2']} allowed, {r['detail']['lost_mm2']} mm2 in all"] if r.get("detail") else []),
             *([f"solid as the slicer gets it: {len(r['solid_gate']['bodies'])} bodies, open/inside-out "
-               f"{sum(not b['ok'] for b in r['solid_gate']['bodies'])}, tunnels {r['solid_gate']['tunnels']}; scan volume not solid "
+               f"{sum(not b['ok'] for b in r['solid_gate']['bodies'])}, tunnels {r['solid_gate']['tunnels']} of {r['solid_gate'].get('tunnels_allowed', 150)}; scan volume not solid "
                f"{r['solid_gate']['missing_mm3']} mm3, solid outside the scan {r['solid_gate']['extra_mm3']} mm3 (of "
                f"{r['solid_gate']['scan_volume_mm3']}); thin surface ({r['solid_gate']['thin_surface_mm2']} mm2) not solid "
                f"{100 * r['solid_gate']['thin_not_solid_share']:.1f} %"] if r.get("solid_gate") else []),

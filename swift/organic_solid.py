@@ -65,6 +65,20 @@ def orient(parts):
     return out
 
 
+def already_solid(tris, share=1e-3):
+    """The mesh is a solid as it is (a print file, a CAD export, a watertight scan): every edge on exactly two
+    faces, every piece facing out (orient first) or a cavity, and next to no face cutting through another.
+    Closing it on a grid again only rounds it: a lattice's struts fuse and its holes fill."""
+    v, f = indexed(tris)
+    _, n = np.unique(np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1), axis=0, return_counts=True)
+    if len(f) == 0 or (n != 2).any():
+        return False
+    signed = lambda t: np.einsum("ij,ij->i", t[:, 0], np.cross(t[:, 1], t[:, 2])).sum()
+    if signed(tris) <= 0:
+        return False
+    return self_intersecting(v, f).mean() <= share
+
+
 def grid_for(tris):
     """The grid step: half the scan's median edge - the closing rounds every edge and thin fin by about a cell,
     and a cell under the scan's own spacing has nothing more to follow - kept between 1/1650 and 1/1100 of the
@@ -219,6 +233,10 @@ def reduce_mesh(tris, faces, passes=12, safe=True):
     tries = np.zeros(len(v), int)          # how often a spot came back: its keep widens only there
     signed = lambda t: np.einsum("ij,ij->i", t[:, 0], np.cross(t[:, 1], t[:, 2])).sum()
     cavities = [(p.reshape(-1, 3).min(0), p.reshape(-1, 3).max(0)) for p in pieces(tris) if signed(p) < 0]
+    # faces that already cut through each other (a print file's own) stay as they are: only new ones are bad
+    own = self_intersecting(v, f) if safe else np.zeros(len(f), bool)
+    keep[f[own].ravel()] = True
+    inherited = {tuple(x) for x in v[keep]}
     for _ in range(passes):
         ms = pymeshlab.MeshSet()
         ms.add_mesh(pymeshlab.Mesh(v, f, f_scalar_array=(~keep[f].any(1)).astype(float)))
@@ -230,7 +248,7 @@ def reduce_mesh(tris, faces, passes=12, safe=True):
         out = rv[rf]
         if not safe:
             return out
-        bad = list(out[self_intersecting(rv, rf)])
+        bad = [t for t in out[self_intersecting(rv, rf)] if not all(tuple(x) in inherited for x in t)]
         # a shell turned inside out: negative, and not where the dense mesh has a cavity
         bad += [p for p in pieces(out) if signed(p) < 0 and not any(((p.mean((0, 1)) >= lo) & (p.mean((0, 1)) <= hi)).all() for lo, hi in cavities)]
         if not bad:

@@ -205,7 +205,7 @@ class Workbench:
         encloses no volume is thickened in ScanRuler first), reduce it to max_triangles keeping it closed, and
         write it as a closed STEP solid. The
         validator holds it to the scan's noise, whatever the caller asks for. Needs the page."""
-        from organic_solid import close_mesh, grid_for, orient, pieces, reduce_mesh
+        from organic_solid import already_solid, close_mesh, grid_for, orient, pieces, reduce_mesh
         from meshio_min import write_stl
         from step_faceted import write_step
         stem = self.stl.stem
@@ -219,6 +219,8 @@ class Workbench:
         scan = np.concatenate(orient(pieces(read_stl(self.repaired))))
         write_stl(self.repaired, scan)
         grid = grid or grid_for(scan)
+        if already_solid(scan):
+            return self._organic_as_is(scan, grid, max_triangles, report)
         solid = close_mesh(scan, grid)
         if not len(solid):
             # the scan encloses no volume - one side of a part, a relief, a face: ScanRuler gives it thickness
@@ -243,6 +245,20 @@ class Workbench:
         reduced = reduce_mesh(solid, max_triangles)
         report.append(f"reduced to {len(reduced)} triangles (MeshLab quadric, topology kept, thin walls kept from cutting through each other)")
         reduced = self._fewest_faces(reduced, closed, grid, report)
+        return self._deliver_solid(solid, reduced, max_triangles, report)
+
+    def _organic_as_is(self, scan, grid, max_triangles, report):
+        """The scan is already a closed solid (a print file, a lattice): it is the solid, every hole and strut as
+        it is - only fewer faces where the validator, holding a closed mesh to no noise, still passes them."""
+        self.closed, self.grid = self.repaired, grid      # nothing bridged: the solid is the scan
+        report.append(f"already a closed solid ({len(scan)} triangles, every edge on two faces): kept as it is, no closing")
+        return self._deliver_solid(scan, self._fewest_faces(scan, self.repaired, grid, report), max_triangles, report)
+
+    def _deliver_solid(self, solid, reduced, max_triangles, report):
+        from meshio_min import write_stl
+        from organic_solid import reduce_mesh
+        from step_faceted import write_step
+        stem = self.stl.stem
         write_stl(self.reduced, reduced)
         self.look = self.work / f"{stem}_look.stl"         # what the part finders read: evenly coarse
         write_stl(self.look, reduce_mesh(solid, max_triangles, safe=False))
@@ -475,8 +491,8 @@ class Workbench:
         """The finders' bodies, applied (and drawn) for Swift to look at and change, or delivered as they are
         without Swift: every piece of 1 % of the volume or more that is no sheet a body of its own (the
         largest "Model"), the rest joining the nearest; cut out of the pieces they are fused into: each ring
-        or gear seen over 60 % of its turn, each straight rod 15 radii long or more (a staff, a shaft; a
-        leg is round too, but not that straight that long) and a stand the solid stands on (at its top face)."""
+        or gear seen over 60 % of its turn, each straight rod 15 radii long or more with a free end (a staff, a shaft; a
+        leg is round too, but not that straight that long; one joined at both ends is a frame's strut) and a stand the solid stands on (at its top face)."""
         from bodies import _pieces, survey
         from rings import find_stand
         whole = read_stl(self.whole)
@@ -491,7 +507,10 @@ class Workbench:
             on = fused(r["pieces"], np.pi * (r["tip"] ** 2 - r["bore"] ** 2) * r["thickness"])
             if on:
                 cuts.append({"name": f"Ring {sum(c['kind'] == 'ring' for c in cuts) + 1}", "kind": "ring", "ring": r["id"], "pieces": on})
-        for r in (x for x in self.rods if x["length"] >= 15 * x["radius"] and x["coverage"] >= 0.8):
+        # a rod that runs into more material at both ends is a member of a frame (a lattice's strut, a chair's
+        # rung), not a part of its own: a staff or a shaft has an end that is free or a head nothing else joins
+        frame = lambda x: len(x.get("heads", [])) == 2 and not any(hd["clean"] for hd in x["heads"])
+        for r in (x for x in self.rods if x["length"] >= 15 * x["radius"] and x["coverage"] >= 0.8 and not frame(x)):
             on = fused(r["pieces"], np.pi * r["radius"] ** 2 * r["length"])
             if on:
                 name = f"Rod {sum(c['kind'] == 'rod' for c in cuts) + 1}"
