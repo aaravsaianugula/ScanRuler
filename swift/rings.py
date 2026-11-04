@@ -329,7 +329,9 @@ def follow_rod(rod, solid):
                 widened = None
         halves.append((path[:seen + 1], widened))
     (a_, wa), (b_, wb) = halves
-    path = [*a_[::-1], *b_[1:]] if len(b_) else a_[::-1]
+    # both halves start at their own end of the fitted run: b_ keeps its first point, or a far end followed no further
+    # collapsed the rod to the near half and it was dropped as short (Frieren's staff at 112k faces)
+    path = [*a_[::-1], *b_]
     path = np.array([x for x in path])
     rod["path"] = path.round(3).tolist()
     rod["ends"] = [path[0].round(2).tolist(), path[-1].round(2).tolist()]
@@ -438,8 +440,9 @@ def find_rods(tris, of=None, samples=40000, tries=4000, seed=0, solid=None):
         d -= np.outer(d @ ax, ax)
         dist = np.linalg.norm(d, axis=1)
         on = idx[(np.abs(dist - r) < 0.3 + 0.02 * r) & ((N[idx] * d).sum(1) > 0.85 * dist)]
-        if len(on) < 100:
-            break
+        if len(on) < 100:       # a weak fit is set aside, not the end: Frieren's staff came after one (112k faces)
+            left[on] = False
+            continue
         first = on
         # refine on its samples: the centre and radius a circle fit across the axis, the axis their principal
         # direction where they run long along it (a short patch's principal direction is any)

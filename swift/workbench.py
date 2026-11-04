@@ -445,12 +445,22 @@ class Workbench:
         for r in rings:
             if not any(same_ring(r, o) for o in self.rings + new_rings):
                 new_rings.append(r)
-        # a straight stretch of a ring reads as a rod (Kurisu's big gear): Swift cut it off the gear. A rod whose centre
-        # is inside a ring as fitted is that ring
-        from bodies import _holds
+        # a straight stretch of a ring reads as a rod (Kurisu's big gear): Swift cut it off the gear. A rod whose path
+        # lies mostly inside a ring as fitted (grown 2 mm) is that ring
+        import igl
+        from bodies import _tris
         from rings import knife as ring_knife
-        knives = [ring_knife(g, 1.0) for g in self.rings + new_rings]
-        new_rods = [r for r in new_rods if not any(_holds(K, r["centre"]) for K in knives)]
+        from step_faceted import indexed as _ix
+        knives = [_ix(_tris(ring_knife(g, 2.0))) for g in self.rings + new_rings]
+        def along(r):           # 20 points along the path (it may be its two ends only)
+            p = np.asarray(r.get("path") or [r["centre"]], float)
+            if len(p) < 2:
+                return p
+            s = np.r_[0, np.cumsum(np.linalg.norm(np.diff(p, axis=0), axis=1))]
+            q = np.linspace(0, s[-1], 20)
+            return np.c_[[np.interp(q, s, p[:, k]) for k in range(3)]].T
+        in_ring = lambda r: any((igl.fast_winding_number(kv, kf.astype(np.int64), along(r)) > 0.5).mean() >= 0.5 for kv, kf in knives)
+        new_rods = [r for r in new_rods if not in_ring(r)]
         for r in new_rods:
             r["id"] = len(self.rods); self.rods.append(r)
         for r in new_rings:
@@ -536,7 +546,7 @@ class Workbench:
         from validate import edge_counts, volume
         tri = lambda b: b[0][b[1]] if isinstance(b, tuple) else b
         left_out = []
-        for _ in range(4):
+        for _ in range(6):
             try:
                 bodies, kept, dropped, cuts = group(whole, self.pieces, groups, drop, rest, splits, getattr(self, 'rings', None) or (),
                                                     getattr(self, 'rods', None) or ())
@@ -546,6 +556,16 @@ class Workbench:
             if not broken or not splits:
                 break
             bad = {str(c.get("name", "")).strip() for c in splits} & set(broken) or {str(splits[-1].get("name", "")).strip()}
+            # a pinch is the knife just touching the surface: first a knife 30 % wider, then the cut is left out
+            widen = lambda c: str(c.get("name", "")).strip() in bad and c.get("kind") in ("ring", "rod") and not c.get("_wider")
+            if any(widen(c) for c in splits):
+                splits = [dict(c, grow=1.3 * float(c.get("grow", 1.0)), _wider=True) if widen(c) else c for c in splits]
+                continue
+            head = lambda c: str(c.get("name", "")).strip() in bad and c.get("kind") == "box"     # then without a rod's head box
+            if any(head(c) for c in splits) and any(str(c.get("name", "")).strip() in bad and c.get("kind") == "rod" for c in splits):
+                left_out += [f"{c['name']} (head box)" for c in splits if head(c)]
+                splits = [c for c in splits if not head(c)]
+                continue
             left_out += sorted(bad)
             splits = [c for c in splits if str(c.get("name", "")).strip() not in bad]
         if broken:
