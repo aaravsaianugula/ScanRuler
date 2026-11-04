@@ -318,9 +318,10 @@ class Workbench:
         original mesh, its detail check included. The first halving that fails stops it."""
         from meshio_min import write_stl
         from organic_solid import reduce_mesh
-        best, trial = tris, self.work / f"{self.stl.stem}_trial.stl"
-        while len(best) // 2 >= floor:
-            t = reduce_mesh(best, len(best) // 2)
+        best, trial, step = tris, self.work / f"{self.stl.stem}_trial.stl", 0.5
+        # halving while it passes; the first fail tries a quarter off once more (Frieren: half fails, 173k faces kept)
+        while int(len(best) * step) >= floor:
+            t = reduce_mesh(best, int(len(best) * step))
             if len(t) > 0.9 * len(best):        # thin walls kept dense: this is as few as it goes without cutting through
                 break
             write_stl(trial, t)
@@ -328,7 +329,10 @@ class Workbench:
             report.append(f"  {len(t)} faces: {r['verdict']}, detail lost {r['detail']['largest_lost_mm2']} mm2 of "
                           f"{r['detail']['allowed_mm2']} allowed" + ("" if r["verdict"] == "PASS" else f" ({', '.join(k for k, v in r['checks'].items() if not v)}): keeping {len(best)}"))
             if r["verdict"] != "PASS":
-                break
+                if step == 0.75:
+                    break
+                step = 0.75
+                continue
             best = t
         trial.unlink(missing_ok=True)
         return best
@@ -520,16 +524,24 @@ class Workbench:
         added = [dict(c, name=c["name"] + (" (finder)" if c["name"] in names else "")) for c in found
                  if c["name"] in lost and c.get("kind") != "plane"]
         splits = list(splits) + added
-        try:
-            bodies, kept, dropped, cuts = group(whole, self.pieces, groups, drop, rest, splits, getattr(self, 'rings', None) or (),
-                                                getattr(self, 'rods', None) or ())
-        except (ValueError, KeyError, TypeError) as e:
-            return f"refused: {e}"
-        # a slicer drops a body that is open or inside out (Kurisu's knife-cut ring fragments printed nothing):
-        # every body must be closed and face out, or the solid goes as the one body it is, uncut
+        # a slicer drops a body that is open or inside out (Kurisu's knife-cut ring fragments printed nothing): every
+        # body must be closed and face out. A cut whose body came out so is left out and the rest tried again (Frieren:
+        # a second rod pinched the figure and the staff and stand were lost with it); at worst the solid goes uncut
         from validate import edge_counts, volume
         tri = lambda b: b[0][b[1]] if isinstance(b, tuple) else b
-        broken = [n for n, b in bodies if edge_counts(tri(b)) != (0, 0) or volume(tri(b)) <= 0]
+        left_out = []
+        for _ in range(4):
+            try:
+                bodies, kept, dropped, cuts = group(whole, self.pieces, groups, drop, rest, splits, getattr(self, 'rings', None) or (),
+                                                    getattr(self, 'rods', None) or ())
+            except (ValueError, KeyError, TypeError) as e:
+                return f"refused: {e}"
+            broken = [n for n, b in bodies if edge_counts(tri(b)) != (0, 0) or volume(tri(b)) <= 0]
+            if not broken or not splits:
+                break
+            bad = {str(c.get("name", "")).strip() for c in splits} & set(broken) or {str(splits[-1].get("name", "")).strip()}
+            left_out += sorted(bad)
+            splits = [c for c in splits if str(c.get("name", "")).strip() not in bad]
         if broken:
             bodies, cuts, kept = [(self.stl.stem, kept)], [], kept
         self.reduced = self.work / f"{self.stl.stem}_bodies.stl"
@@ -540,7 +552,9 @@ class Workbench:
         warn = [f"KEPT the finders' cut {c['name']} ({c['kind']} {c.get('ring', c.get('rod'))}) the call left out: that part stays a body "
                 "of its own (to name it, cut the same ring or rod under the name you want)" for c in added if c.get("kind") != "box"]
         return "\n".join(([f"REFUSED the split: bodies {', '.join(map(str, broken[:8]))} came out open or inside out, so the solid "
-                           "is written as one body"] if broken else []) + warn + [f"STEP {self.organic_step.name}: {info['products']} bodies, {info['solids']} solids, {info['voids']} cavities; "
+                           "is written as one body"] if broken else [])
+                         + ([f"LEFT OUT the cut(s) {', '.join(left_out)}: their bodies came out open or inside out (a pinch where the knife "
+                             "met the surface); the other cuts stand"] if left_out and not broken else []) + warn + [f"STEP {self.organic_step.name}: {info['products']} bodies, {info['solids']} solids, {info['voids']} cavities; "
                           f"picture: {self.work / 'bodies.png'} (view_image: is each part one body, and nothing of one in another?)"]
                          + [f"  {b['name']}: {b['volume']} mm3, box {b['lo']}..{b['hi']}" for b in self.bodies]
                          + [f"  {c['name']}: {c['kind']} cut from pieces {c['pieces']}, {c['volume']} mm3"
