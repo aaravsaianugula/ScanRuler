@@ -419,10 +419,19 @@ class Workbench:
         sel, sel_s = near_of(t), near_of(v[f])
         if sel.sum() < 50 or sel_s.sum() < 50:
             return f"nothing of the solid within {within} mm of {near}"
-        # rings on the solid too: a thin gear fused to the figure breaks into sub-60 mm2 patches on the finer, noisier
-        # look copy (Kurisu: 2 of 5 gears seen only on the solid)
+        # rings on a coarse copy too: a thin gear fused to the figure breaks into sub-60 mm2 patches on a fine, noisy
+        # mesh (Kurisu: 2 of 5 gears seen only at ~25k faces, not on the 150k look copy nor an 80k solid)
         rods = find_rods(v[f][sel_s], of[sel_s], solid=v[f])
-        rings = find(t[sel], ot[sel]) + (find(v[f][sel_s], of[sel_s]) if t is not v[f] else [])
+        rings = find(t[sel], ot[sel])
+        if len(f) > 30000:
+            from organic_solid import reduce_mesh
+            from scipy.spatial import cKDTree
+            tc = reduce_mesh(v[f], 25000, safe=False)
+            oc = of[cKDTree(v[f].mean(1)).query(tc.mean(1))[1]]
+            sc = near_of(tc)
+            rings += find(tc[sc], oc[sc])
+        else:
+            rings += find(v[f][sel_s], of[sel_s])
         self.rods, self.rings = getattr(self, "rods", None) or [], getattr(self, "rings", None) or []
         same_rod = lambda a, b: abs(np.dot(a["axis"], b["axis"])) > 0.995 and abs(a["radius"] - b["radius"]) < 0.2 * b["radius"] and \
             np.linalg.norm(np.cross(np.subtract(a["centre"], b["centre"]), b["axis"])) < b["radius"]
