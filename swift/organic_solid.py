@@ -203,14 +203,26 @@ def close_mesh(tris, h=None, slab=24, handles=3, log=lambda s: print(s, file=sys
             add, cut = topology.simplify(grid < 0, handles, log=log)
             g = grid.reshape(-1)
             g[add], g[cut] = -0.5 * h, 0.5 * h         # a plug or a cut about a cell thick
+            iz, iy, ix = np.unravel_index(np.concatenate([np.asarray(add).ravel(), np.asarray(cut).ravel()]).astype(np.int64), grid.shape)
+            sure[iz // k, iy // k, ix // k] = False     # marching cubes looks there too
         except MemoryError:     # its labels take ~3x the grid: a solid with its small handles beats none
             log(f"[organic] not enough memory to take small handles off a {grid.size / 1e6:.0f} M-point grid: kept as closed")
     log(f"[organic] handles off: {time.time() - t0:.0f} s")
     verts, faces, base = [], [], 0
     for z0 in range(0, n[2] - 1, slab):
-        z = lo[2] + h * np.arange(z0, min(n[2], z0 + slab + 1))
-        P = np.c_[np.tile(layer, (len(z), 1)), np.repeat(z, per)]
-        mv, mf, _ = igl.marching_cubes(grid[z0:z0 + len(z)].reshape(-1).astype(float), P, int(n[0]), int(n[1]), len(z), 0.0)
+        z1 = min(n[2], z0 + slab + 1)
+        # a sign change has both ends within the band: only inside the near blocks (the rest is one sign) - the
+        # slab is cut to their box, the vertices come out on the same grid edges as before (Frieren: 162 s whole)
+        near = ~sure[z0 // k:(z1 - 1) // k + 1].all(0)
+        if not near.any():
+            continue
+        yb, xb = np.flatnonzero(near.any(1)), np.flatnonzero(near.any(0))
+        y0, y1 = max(0, yb[0] * k - 1), min(n[1], (yb[-1] + 1) * k + 1)
+        x0, x1 = max(0, xb[0] * k - 1), min(n[0], (xb[-1] + 1) * k + 1)
+        z = lo[2] + h * np.arange(z0, z1)
+        X, Y = np.meshgrid(lo[0] + h * np.arange(x0, x1), lo[1] + h * np.arange(y0, y1), indexing="xy")
+        P = np.c_[np.tile(np.c_[X.ravel(), Y.ravel()], (len(z), 1)), np.repeat(z, X.size)]
+        mv, mf, _ = igl.marching_cubes(grid[z0:z1, y0:y1, x0:x1].reshape(-1).astype(float), P, x1 - x0, y1 - y0, len(z), 0.0)
         verts.append(mv); faces.append(mf + base); base += len(mv)
     out = np.concatenate(verts)[np.concatenate(faces)]
     log(f"[organic] marching cubes: {time.time() - t0:.0f} s")

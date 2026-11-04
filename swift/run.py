@@ -271,21 +271,23 @@ def main():
             log(f"[run] Swift: {why}" + ("" if need else ", none needed"))
             if need and not swift_ok:
                 log("[run] Swift is off or the Gateway does not answer: the autopilot's result stands")
+            elif need == "review" and SWIFT_BUDGET - (time.time() - t0) < 45:
+                log("[run] no time left in the run's budget for a review: the finders' bodies and names stand")
             elif need:
                 phase("swift", "Swift is judging the bodies" if need == "review" else "Swift is repairing what failed")
                 wb.narrate = False
                 # bounded: a review is a few turns, a repair more; neither pushes the run far past its budget
                 left = SWIFT_BUDGET - (time.time() - t0)
-                agent = Agent(wb, "organic", log=log, max_turns=12 if need == "review" else 30, emit=emit,
-                              deadline=time.time() + (max(180, left) if need == "review" else max(600, left)), review=need == "review")
+                agent = Agent(wb, "organic", log=log, max_turns=8 if need == "review" else 30, emit=emit,
+                              deadline=time.time() + (left if need == "review" else max(600, left)), review=need == "review")
                 agent.passed, agent.checked_at = not failed, agent.changes
                 auto = dict(wb.proposal) if getattr(wb, "proposal", None) else None
                 if need == "review":
                     msg = (f"Scan: {stl.name}. The autopilot already closed it into a solid and the validator PASSES. The part finders "
                            f"made these bodies:\n{clip(getattr(wb, 'bodies_text', ''), 5000)}\n\nLook at bodies.png (view_image). Name every "
-                           "body for what it is; change a group or cut only where the picture clearly shows it wrong (a part split between "
-                           "bodies, a cut through the wrong thing) - the finders are usually right. Then call group_bodies once with the call "
-                           "above edited (new names at least), check, finish. Do not call organic_route: the solid is done.")
+                           "body for what it is with name_bodies (instant, nothing recut), then finish. Only where the picture clearly shows "
+                           "a body wrong (a part split between bodies, a cut through the wrong thing) call group_bodies with the call above "
+                           "edited, then check, then finish - the finders are usually right. Do not call organic_route: the solid is done.")
                 else:
                     msg = (f"Scan: {stl.name}, opened in ScanRuler (millimetres). {analysis.splitlines()[0]}: classified organic. The "
                            f"autopilot ran organic_route and the finders' bodies, and {why}:\n"
@@ -293,7 +295,9 @@ def main():
                            f"{clip(getattr(wb, 'bodies_text', ''), 3000)}\n\nFix what fails (group_bodies, body_pieces, or scanruler mesh "
                            "tools then organic_route again), check, finish.")
                 sreport, sfailed = agent.run(msg)
-                if sfailed or not agent.passed:
+                if agent.changes == 0:      # looked and renamed at most: the autopilot's solid and check stand
+                    report = ORGANIC_REPORT + (f"\n\nSwift ({why}):\n{sreport}" if not sfailed else "")
+                elif sfailed or not agent.passed:
                     log("[run] Swift's change did not pass: back to the autopilot's bodies")
                     restore_autopilot(wb, auto, log)
                     failed = wb.last_validation is None or wb.last_validation["verdict"] != "PASS"

@@ -56,6 +56,9 @@ SCAN_TOOLS = [
     tool("body_pieces", "After organic_route: look at the solid - three views with a mm grid, its closed pieces coloured and numbered - "
          "and the pieces listed largest first (volume, box, cavities, nearest piece and gap, touching). Decide from the picture which "
          "parts a person would call separate bodies, and where they are."),
+    tool("name_bodies", "After organic_route: rename bodies, nothing else changes (no cut, the last check stands, a second or two). "
+         "names: {old name: new name} - what each part is (Figure, Staff, Base, Gear ...).",
+         {"names": {"type": "object", "additionalProperties": {"type": "string"}}}, ["names"]),
     tool("group_bodies", "After organic_route: name the bodies and write each as a named solid in the STEP, then the validator judges what is kept. "
          "groups: [{name, pieces: [ids]}] (one body each: a sliver hugging the figure goes in the figure's group); drop: junk ids (specks, "
          "stray layers; reported); rest: what unlisted pieces do - 'touching' (join the group of a grouped piece they touch, else dropped), "
@@ -179,6 +182,9 @@ class Agent:
         self.review = review        # the solid is built: bodies and names only, no organic_route
         self.emit = emit or (lambda *a, **k: None)     # the desktop app's event stream
         self.tools = COMMON + (CAD_TOOLS if mode == "cad" else SCAN_TOOLS)
+        if review:                  # a few quick turns: the body tools, nothing that measures or rebuilds
+            keep = {"view_image", "body_pieces", "name_bodies", "group_bodies", "check", "finish"}
+            self.tools = [t for t in self.tools if t["function"]["name"] in keep]
         self.changes = 0            # bumped by anything that may change the model
         self.checked_at = -1        # self.changes when the last check ran
         self.passed = False
@@ -290,7 +296,29 @@ class Agent:
     def t_find_parts(self, near=None, within=40.0):
         return self._with(self.wb.find_parts(near, within), "parts.png")
 
+    def _renames(self, groups, drop, cuts):
+        """{old: new} when groups and cuts are the bodies as they stand (the finders' proposal) under other names."""
+        p = getattr(self.wb, "proposal", None)
+        if not p or drop or len(groups) != len(p["groups"]) or len(cuts) != len(p["cuts"]):
+            return None
+        bare = lambda xs: json.dumps([{k: v for k, v in x.items() if k != "name"} for x in xs], sort_keys=True)
+        if bare(groups) != bare(p["groups"]) or bare(cuts) != bare(p["cuts"]):
+            return None
+        names = {}
+        for old, new in zip(p["groups"] + p["cuts"], list(groups) + list(cuts)):
+            o, n = str(old.get("name", "")), str(new.get("name", "")).strip()
+            if names.setdefault(o, n) != n:
+                return None
+        have = {n for n, _ in getattr(self.wb, "written", None) or []}
+        return {o: n for o, n in names.items() if o in have and n and n != o}
+
+    def t_name_bodies(self, names):
+        return self._with(self.wb.rename_bodies(names), "bodies.png")
+
     def t_group_bodies(self, groups, drop=(), rest="touching", cuts=()):
+        names = self._renames(groups, drop, cuts)
+        if names is not None:           # the finders' call with new names only: renamed, nothing recut (minutes on a big solid)
+            return self.t_name_bodies(names)
         out = self.wb.group_bodies(groups, drop, rest, cuts)
         if out.startswith(("refused", "no organic")):
             return out

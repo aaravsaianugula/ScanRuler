@@ -464,7 +464,23 @@ def solid_gate(scan, bodies, grid, noise, points=3_000_000, seed=0, sheet=None, 
     return r
 
 
-_SCAN = {}
+_SCAN, _PENDING = {}, {}
+PRINT_NOISE = 0.02      # mm: the tolerance basis of a clean closed mesh (p99 3.5 x + 0.03 = 0.1)
+
+
+def _key(inp, repaired, closed, grid, max_points):
+    import os
+    return tuple((str(p), os.stat(p).st_mtime_ns, os.stat(p).st_size) if p else None for p in (inp, repaired, closed)) + (grid, max_points)
+
+
+def prefetch(inp, repaired, closed=None, grid=None, max_points=300_000):
+    """validate_organic's scan side, computed in a thread now (while the solid is being reduced) and kept."""
+    import threading
+    k = _key(inp, repaired, closed, grid, max_points)
+    if k not in _SCAN and k not in _PENDING:
+        t = threading.Thread(target=_scan_side, args=(inp, repaired, closed, grid, max_points), daemon=True)
+        _PENDING[k] = t
+        t.start()
 
 
 def _scan_side(inp, repaired, closed, grid, max_points):
@@ -473,16 +489,21 @@ def _scan_side(inp, repaired, closed, grid, max_points):
     import os
     import igl
     from organic_solid import already_solid, indexed as ix, sheet_faces
-    key = tuple((str(p), os.stat(p).st_mtime_ns, os.stat(p).st_size) if p else None for p in (inp, repaired, closed)) + (grid, max_points)
+    import threading
+    key = _key(inp, repaired, closed, grid, max_points)
+    t = _PENDING.get(key)
+    if t is not None and t is not threading.current_thread():
+        t.join()                                # the prefetch is computing it
     if key in _SCAN:
         return _SCAN[key]
-    _SCAN.clear()
     A, R0 = read_stl(inp), read_stl(repaired)
     size = float(np.linalg.norm(np.ptp(A.reshape(-1, 3), axis=0)))
     spacing = max(0.1, size / 600)
-    # a closed manifold mesh is a model as given (a print file, a lattice), not raw scan: it has no noise to allow -
-    # its plane residual is the curvature of thin struts (a Voronoi car: 0.33 mm, loose enough to smear them)
-    noise = 0.0 if edge_counts(A) == (0, 0) else estimate_noise(A, 0.3)     # 1.5 mm patches: wider ones measure a figurine's curvature, not its noise
+    # a closed manifold mesh is a model as given (a print file, a lattice), not raw scan: no scan noise to allow -
+    # its plane residual is the curvature of thin struts (a Voronoi car: 0.33 mm, loose enough to smear them). It is
+    # held to print resolution instead: p99 0.1 mm, half a 0.2 mm layer (at 0.03 the car kept 129k faces, which
+    # Bambu Studio opens in over 10 minutes; at 68k p99 is 0.07 and no detail is lost)
+    noise = PRINT_NOISE if edge_counts(A) == (0, 0) else estimate_noise(A, 0.3)     # 1.5 mm patches: wider ones measure a figurine's curvature, not its noise
     area = lambda T: float(0.5 * np.linalg.norm(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), axis=1).sum())
     count = lambda T: int(min(max_points, max(1000, area(T) / spacing ** 2)))
     # a repaired triangle is the scan's own when the scan has that very triangle (filling adds new ones)
@@ -505,7 +526,10 @@ def _scan_side(inp, repaired, closed, grid, max_points):
     # a scan that is a closed solid already was delivered as it is: a thin wall of it bounds volume, no open
     # sheet to plate (judged as one, its own surface points sit at winding number 1/2 and flicker)
     c["sheet"] = np.zeros(len(R0), bool) if already_solid(R0) else sheet_faces(*ix(R0), c["g"])
+    if len(_SCAN) > 1:
+        _SCAN.clear()
     _SCAN[key] = c
+    _PENDING.pop(key, None)
     return c
 
 

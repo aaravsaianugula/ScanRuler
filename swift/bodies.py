@@ -191,6 +191,8 @@ def group(tris, pieces, groups, drop=(), rest="touching", splits=(), rings=(), r
             took_parts.append(inside)
             part[i] = None if outside.is_empty() else outside
             took.append(i)
+        if not took_parts and any(x[0] == nm for x in extra):
+            continue        # what it reaches went to this body already (a rod's head box the rod's own cut took whole)
         if not took_parts:
             on = [r.get("pieces") for r in rings if c.get("kind") == "ring" and r["id"] == c.get("ring")]
             raise ValueError(f"cut {k} ({nm}): the knife reaches no kept solid"

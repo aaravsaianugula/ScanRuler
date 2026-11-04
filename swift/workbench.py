@@ -3,6 +3,7 @@
 (over scanruler-mcp) and the independent validator, as plain calls. The Swift agent's tools
 and the deterministic autopilot both go through this."""
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -241,6 +242,8 @@ class Workbench:
                 return "\n".join(report)
         write_stl(closed, solid)
         self._look_ahead(closed, max_triangles)
+        from validate import prefetch
+        prefetch(self.input, self.repaired, closed=closed, grid=grid)      # the validator's scan side, while it reduces
         self.closed, self.grid = closed, grid      # the validator tells bridged gaps from them
         report.append(f"closed on a {grid:.3g} mm grid: {len(solid)} triangles, {closed.name}")
         reduced = reduce_mesh(solid, max_triangles)
@@ -283,6 +286,7 @@ class Workbench:
                       + (f"; {info['faces_left_out']} faces of a cavity no solid holds left out" if info["faces_left_out"] else ""))
         self.whole, self.pieces = self.reduced, None      # what group_bodies starts from, every time
         self.delivered = [(stem, reduced)]                 # the bodies as written: what the validator's solid gate judges
+        self.written = [(stem, reduced)]
         self.rods, self.rings = [], []
         self._bodies([(stem, read_stl(self.reduced))], [], [])
         return "\n".join(report)
@@ -425,6 +429,26 @@ class Workbench:
         write_3mf(self.organic_step.with_suffix(".3mf"), indexed_bodies)      # the same bodies for a slicer, a few MB
         self.emit("bodies", bodies=self.bodies, dropped=dropped, cuts=cuts, image=str(png))
 
+    def rename_bodies(self, names):
+        """The bodies as they are, under new names ({old: new}): the STEP and 3MF rewritten, nothing cut again, so
+        the last check stands."""
+        from step_faceted import write_step
+        have = [n for n, _ in getattr(self, "written", None) or []]
+        if not have:
+            return "no bodies yet: run the organic route first"
+        unknown = [k for k in names if k not in have]
+        new = [str(names.get(n, n)).strip() or n for n in have]
+        if unknown or len(set(new)) < len(new):
+            return (f"refused: no body {unknown} (bodies: {have})" if unknown else f"refused: two bodies would share a name: {new}")
+        self.written = [(m, b) for m, (_, b) in zip(new, self.written)]
+        self.delivered = [(m, t) for m, (_, t) in zip(new, self.delivered)]
+        info = write_step(self.organic_step, None, bodies=self.written)
+        self._bodies(self.written, [], [])
+        for b, m in zip((self.last_validation or {}).get("solid_gate", {}).get("bodies", []), new):
+            b["name"] = m
+        return "\n".join([f"renamed; STEP {self.organic_step.name}: {info['products']} bodies, the check stands"]
+                         + [f"  {b['name']}: {b['volume']} mm3, box {b['lo']}..{b['hi']}" for b in self.bodies])
+
     def body_pieces(self):
         """The organic solid's closed pieces, largest first, and pieces.png (each piece coloured, numbered)."""
         from bodies import describe, survey
@@ -538,6 +562,14 @@ class Workbench:
             cuts.append({"name": "Stand", "kind": "plane", "point": stand["point"], "normal": stand["normal"], "pieces": [big[0]["id"]]})
         self.proposal = dict(groups=groups, cuts=cuts, stand=stand)
         out = self.group_bodies(groups, (), "nearest", cuts)
+        # a finder's cut that does not go through is left out, not every body with it
+        while out.startswith("refused: cut ") and cuts:
+            k = int(re.match(r"refused: cut (\d+)", out).group(1))
+            if k >= len(cuts):
+                break
+            out = f"(left out the finders' cut {cuts[k]['name']}: {out[9:]})\n" + self.group_bodies(groups, (), "nearest", cuts[:k] + cuts[k + 1:])
+            cuts = cuts[:k] + cuts[k + 1:]
+            self.proposal = dict(groups=groups, cuts=cuts, stand=stand)
         todo = ["rename every body for what it is (Model -> the figure's or part's name, Rod 1 -> staff, shaft, pin ...)"]
         for r in self.rods:
             for hd in r.get("heads", []):
@@ -609,6 +641,7 @@ class Workbench:
         info = write_step(self.organic_step, None, bodies=bodies)
         self._bodies(bodies, dropped, cuts)
         self.delivered = [(n, tri(b)) for n, b in bodies]
+        self.written = bodies
         warn = [f"KEPT the finders' cut {c['name']} ({c['kind']} {c.get('ring', c.get('rod'))}) the call left out: that part stays a body "
                 "of its own (to name it, cut the same ring or rod under the name you want)" for c in added if c.get("kind") != "box"]
         return "\n".join(([f"REFUSED the split: bodies {', '.join(map(str, broken[:8]))} came out open or inside out, so the solid "
