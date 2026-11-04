@@ -445,6 +445,12 @@ class Workbench:
         for r in rings:
             if not any(same_ring(r, o) for o in self.rings + new_rings):
                 new_rings.append(r)
+        # a straight stretch of a ring reads as a rod (Kurisu's big gear): Swift cut it off the gear. A rod whose centre
+        # is inside a ring as fitted is that ring
+        from bodies import _holds
+        from rings import knife as ring_knife
+        knives = [ring_knife(g, 1.0) for g in self.rings + new_rings]
+        new_rods = [r for r in new_rods if not any(_holds(K, r["centre"]) for K in knives)]
         for r in new_rods:
             r["id"] = len(self.rods); self.rods.append(r)
         for r in new_rings:
