@@ -240,12 +240,22 @@ class Workbench:
                               "scanruler mesh_* tools, then organic_route")
                 return "\n".join(report)
         write_stl(closed, solid)
+        self._look_ahead(closed, max_triangles)
         self.closed, self.grid = closed, grid      # the validator tells bridged gaps from them
         report.append(f"closed on a {grid:.3g} mm grid: {len(solid)} triangles, {closed.name}")
         reduced = reduce_mesh(solid, max_triangles)
         report.append(f"reduced to {len(reduced)} triangles (MeshLab quadric, topology kept, thin walls kept from cutting through each other)")
         reduced = self._fewest_faces(reduced, closed, grid, report)
         return self._deliver_solid(solid, reduced, max_triangles, report)
+
+    def _look_ahead(self, closed, max_triangles):
+        """The part finders' evenly coarse copy, decimated in another process from the closed STL while the
+        delivered solid is reduced and validated (a plain pass over millions of faces: ~100 s on Frieren)."""
+        from concurrent.futures import ProcessPoolExecutor
+        from organic_solid import write_look
+        pool = ProcessPoolExecutor(1)
+        self.look_ahead = pool.submit(write_look, str(closed), max_triangles, str(self.work / f"{self.stl.stem}_look.stl"))
+        pool.shutdown(wait=False)
 
     def _organic_as_is(self, scan, grid, max_triangles, report):
         """The scan is already a closed solid (a print file, a lattice): it is the solid, every hole and strut as
@@ -261,7 +271,12 @@ class Workbench:
         stem = self.stl.stem
         write_stl(self.reduced, reduced)
         self.look = self.work / f"{stem}_look.stl"         # what the part finders read: evenly coarse
-        write_stl(self.look, reduce_mesh(solid, max_triangles, safe=False))
+        ahead = getattr(self, "look_ahead", None)
+        if ahead:
+            self.look_ahead = None
+            ahead.result()                  # written by another process while the solid was reduced
+        else:
+            write_stl(self.look, reduce_mesh(solid, max_triangles, safe=False))
         report.append(f"delivered at {len(reduced)} faces: {self.reduced.name}")
         info = write_step(self.organic_step, read_stl(self.reduced), stem)
         report.append(f"STEP solid: {self.organic_step.name}, {info['faces']} faces, {info['solids']} solids, {info['voids']} cavities"
@@ -337,7 +352,7 @@ class Workbench:
         best, trial, step = tris, self.work / f"{self.stl.stem}_trial.stl", 0.5
         # halving while it passes; the first fail tries a quarter off once more (Frieren: half fails, 173k faces kept)
         while int(len(best) * step) >= floor:
-            t = reduce_mesh(best, int(len(best) * step))
+            t = reduce_mesh(best, int(len(best) * step), clean=closed != self.repaired)     # an as-is solid may cut through itself
             if len(t) > 0.9 * len(best):        # thin walls kept dense: this is as few as it goes without cutting through
                 break
             write_stl(trial, t)

@@ -149,7 +149,7 @@ function Health() {
 function Home({ onStart, onOpenReport, onReplay, running, onResume }) {
   const [stl, setStl] = useState(null)
   const [mode, setMode] = useState('auto')
-  const [swift, setSwift] = useState(true)
+  const swift = true      // one engine: run.py asks Swift only for what the deterministic routes leave
   const [turns, setTurns] = useState(70)
   const [drag, setDrag] = useState(false)
   const recent = readRecent()
@@ -194,22 +194,16 @@ function Home({ onStart, onOpenReport, onReplay, running, onResume }) {
 
           <fieldset className="seg">
             <legend>ENGINE</legend>
-            <label className={swift ? 'on' : ''}>
-              <input type="radio" name="engine" checked={swift} onChange={() => setSwift(true)} />
-              <span className="seg-orb"><ThinkingOrb state="weaving" size={20} theme="dark" color="#f5c518" /></span><b>SWIFT 1.5</b><small>agent + autopilot</small>
-            </label>
-            <label className={!swift ? 'on' : ''}>
-              <input type="radio" name="engine" checked={!swift} onChange={() => setSwift(false)} />
-              <span className="seg-orb"><ThinkingOrb state="working" size={20} theme="dark" color="#3a6fd8" /></span><b>AUTOPILOT</b><small>exact reading, no AI</small>
+            <label className="on">
+              <input type="radio" name="engine" checked readOnly />
+              <span className="seg-orb"><ThinkingOrb state="weaving" size={20} theme="dark" color="#f5c518" /></span><b>AUTOPILOT + SWIFT 1.5</b><small>exact routes first, Swift only where the part needs judging</small>
             </label>
           </fieldset>
 
-          {swift && (
-            <label className="slider">
-              <span>TURN BUDGET <b>{turns}</b></span>
-              <input type="range" min="20" max="120" step="5" value={turns} onChange={(e) => setTurns(+e.target.value)} />
-            </label>
-          )}
+          <label className="slider">
+            <span>SWIFT TURN BUDGET <b>{turns}</b></span>
+            <input type="range" min="20" max="120" step="5" value={turns} onChange={(e) => setTurns(+e.target.value)} />
+          </label>
 
           <div className="launch-actions">
             {running && <button className="ghost" onClick={onResume}>VIEW CURRENT RUN</button>}

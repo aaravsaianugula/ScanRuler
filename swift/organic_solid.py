@@ -38,7 +38,14 @@ def orient(parts):
     def vol(t):
         c = t - t.reshape(-1, 3).mean(0)
         return float(np.einsum("ij,ij->i", c[:, 0], np.cross(c[:, 1], c[:, 2])).sum() / 6)
-    sure = [abs(vol(t)) > 0.02 * np.prod(np.ptp(t.reshape(-1, 3), axis=0)) for t in parts]
+    def closed(t):
+        _, inv = np.unique(t.reshape(-1, 3), axis=0, return_inverse=True)
+        f = inv.reshape(-1, 3)
+        _, n = np.unique(np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1), axis=0, return_counts=True)
+        return bool((n == 2).all())
+    # a closed shell's volume says which way it faces however thin it is (a ring, a hoop: Kurisu's gears enclose under
+    # 2 % of their box; guessed from the bodies around them, half came out inside out and were plated 0.35 mm proud)
+    sure = [abs(vol(t)) > 0.02 * np.prod(np.ptp(t.reshape(-1, 3), axis=0)) or (abs(vol(t)) > 0 and closed(t)) for t in parts]
     rng = np.random.default_rng(0)
 
     def cavity(i):
@@ -126,6 +133,8 @@ def close_mesh(tris, h=None, slab=24, handles=3, log=lambda s: print(s, file=sys
     and handles under about 2*handles cells across are taken off it (topology.py: a patch layout needs the
     few a figurine really has, not the hundreds a noisy closing leaves); marching cubes runs in slabs sharing
     one layer, welded on it: both compute those vertices from the same grid values."""
+    import time
+    t0 = time.time()
     h = h or grid_for(tris)
     V, F = indexed(np.concatenate(orient(pieces(tris))))
     # thin scanned surface with no clean inside and outside (hair, a cloak's edge, a scan's open flaps): the
@@ -142,18 +151,39 @@ def close_mesh(tris, h=None, slab=24, handles=3, log=lambda s: print(s, file=sys
     X, Y = np.meshgrid(lo[0] + h * np.arange(n[0]), lo[1] + h * np.arange(n[1]), indexing="xy")   # x fastest, as igl wants
     layer, per = np.c_[X.ravel(), Y.ravel()], n[0] * n[1]
     grid = np.empty((n[2], n[1], n[0]), np.float32)
+    # narrow band: blocks of k^3 points whose centre is farther from the scan than band + the block's half
+    # diagonal hold no point within the band - they only need a sign, the centre's winding number where it is
+    # clear of 1/2 (a hole's membrane, where it is not, is signed point by point as before)
+    k = 8
+    nb = -(-n // k)
+    cz, cy, cx = np.meshgrid(*(lo[i] + h * (k * np.arange(nb[i]) + (k - 1) / 2) for i in (2, 1, 0)), indexing="ij")
+    Q = np.c_[cx.ravel(), cy.ravel(), cz.ravel()]
+    # the trees once: each igl call builds its own (Frieren: 1-2.5 s a call, ~4 calls a slab, ~70 slabs)
+    tree, fwn = igl.AABB(), igl.FastWindingNumberBVH()
+    tree.init(V, F)
+    fwn.init(V, F)
+    Fs = F[sheet]
+    if len(Fs):
+        stree = igl.AABB()
+        stree.init(V, Fs)
+    wq = fwn.winding_number(Q)
+    far_q = np.sqrt(tree.squared_distance(V, F, Q)[0]) > band + np.sqrt(3) * k * h / 2
+    sure = (far_q & (np.abs(wq - 0.5) > 0.35)).reshape(nb[2], nb[1], nb[0])
+    sign_q = np.where(wq > 0.5, -band, band).astype(np.float32).reshape(nb[2], nb[1], nb[0])
+    bx, by = np.meshgrid(np.arange(n[0]) // k, np.arange(n[1]) // k, indexing="xy")
+    bx, by = bx.ravel(), by.ravel()
     for z0 in range(0, n[2], slab):
         z = lo[2] + h * np.arange(z0, min(n[2], z0 + slab))
-        P = np.c_[np.tile(layer, (len(z), 1)), np.repeat(z, per)]
-        s, I, C, _ = igl.signed_distance(P, V, F, SIGNED, -band, band)
-        far = ~np.isfinite(s)                       # past the band igl gives no sign: the winding number does
-        s[far] = np.where(igl.fast_winding_number(V, F, P[far]) > 0.5, -band, band)
-        # igl signs by |w|: in front of an open sheet's hollow (a relief's dip) w nears -1 and it says inside
-        neg = np.flatnonzero(~far & (s < 0))
-        s[neg[igl.fast_winding_number(V, F, P[neg]) <= 0.5]] *= -1
-        # and s is d (1 - 2|w|), not d: where w stays near 1/2 beside the surface (a crevice, a noisy layer)
-        # marching cubes put it up to half a cell off the scan (Frieren: 5-10 mm2 patches 0.1 mm proud)
-        s[~far] = np.copysign(np.linalg.norm(P[~far] - C[~far], axis=1), s[~far])
+        bz = np.repeat(np.arange(z0, z0 + len(z)) // k, per)
+        todo = ~sure[bz, np.tile(by, len(z)), np.tile(bx, len(z))]
+        full = sign_q[bz, np.tile(by, len(z)), np.tile(bx, len(z))]
+        P = np.c_[np.tile(layer, (len(z), 1)), np.repeat(z, per)][todo]
+        d2, I, C = tree.squared_distance(V, F, P)
+        # inside where the winding number is over 1/2 (igl's signed distance signs by |w|, which in front of an
+        # open sheet's hollow - a relief's dip, w near -1 - says inside), and s the true distance, not igl's
+        # d (1 - 2|w|): where w stays near 1/2 beside the surface (a crevice, a noisy layer) that put marching
+        # cubes up to half a cell off the scan (Frieren: 5-10 mm2 patches 0.1 mm proud). Past the band: +-band
+        s = np.minimum(np.sqrt(d2), band) * np.where(fwn.winding_number(P) > 0.5, -1.0, 1.0)
         near = np.flatnonzero(np.abs(s) < r)
         on = near[sheet[I[near]]]
         s[on] = np.minimum(s[on], np.abs(s[on]) - r)
@@ -161,10 +191,12 @@ def close_mesh(tris, h=None, slab=24, handles=3, log=lambda s: print(s, file=sys
         # cut off sheer, 109 so; a whole cell gave 58 but stood proud of the scan, detail lost)
         rest = near[~sheet[I[near]]]
         if len(rest) and sheet.any():
-            s[rest] = np.minimum(s[rest], np.sqrt(igl.point_mesh_squared_distance(P[rest], V, F[sheet])[0]) - h / 2)
+            s[rest] = np.minimum(s[rest], np.sqrt(stree.squared_distance(V, Fs, P[rest])[0]) - h / 2)
         # a grid point on the surface puts several vertices on it, and the weld below would merge them
         s = np.where(np.abs(s) < 1e-4 * h, np.where(s < 0, -1e-4 * h, 1e-4 * h), s)
-        grid[z0:z0 + len(z)] = s.reshape(len(z), n[1], n[0])
+        full[todo] = s
+        grid[z0:z0 + len(z)] = full.reshape(len(z), n[1], n[0])
+    log(f"[organic] distance field: {grid.size / 1e6:.0f} M points, {(~sure).mean():.0%} of the blocks near the scan, {time.time() - t0:.0f} s")
     if handles:
         import topology
         try:
@@ -173,6 +205,7 @@ def close_mesh(tris, h=None, slab=24, handles=3, log=lambda s: print(s, file=sys
             g[add], g[cut] = -0.5 * h, 0.5 * h         # a plug or a cut about a cell thick
         except MemoryError:     # its labels take ~3x the grid: a solid with its small handles beats none
             log(f"[organic] not enough memory to take small handles off a {grid.size / 1e6:.0f} M-point grid: kept as closed")
+    log(f"[organic] handles off: {time.time() - t0:.0f} s")
     verts, faces, base = [], [], 0
     for z0 in range(0, n[2] - 1, slab):
         z = lo[2] + h * np.arange(z0, min(n[2], z0 + slab + 1))
@@ -180,6 +213,7 @@ def close_mesh(tris, h=None, slab=24, handles=3, log=lambda s: print(s, file=sys
         mv, mf, _ = igl.marching_cubes(grid[z0:z0 + len(z)].reshape(-1).astype(float), P, int(n[0]), int(n[1]), len(z), 0.0)
         verts.append(mv); faces.append(mf + base); base += len(mv)
     out = np.concatenate(verts)[np.concatenate(faces)]
+    log(f"[organic] marching cubes: {time.time() - t0:.0f} s")
     v, f = indexed(np.round(out, 9))               # weld the shared layers
     f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 2] != f[:, 0])]
     out = v[f]
@@ -216,7 +250,66 @@ def self_intersecting(v, f):
     return ms.current_mesh().face_selection_array()
 
 
-def reduce_mesh(tris, faces, passes=12, safe=True):
+def write_look(src, faces, out):
+    """The part finders' copy of a closed STL: one plain decimation pass (run in a process of its own)."""
+    from meshio_min import read_stl, write_stl
+    write_stl(out, reduce_mesh(read_stl(src), faces, safe=False))
+    return out
+
+
+def _chunk_job(job):
+    t, frozen, target = job
+    return reduce_mesh(t, target, passes=4, frozen=frozen, shells=False)
+
+
+def _reduce_chunked(tris, faces, passes=6, log=lambda s: print(s, file=sys.stderr)):
+    """A first decimation of a closing of millions of faces, in slabs decimated in parallel: a slab's faces on
+    its border stay as they are, so the slabs stitch back exactly. Where a wall then cuts through another or a
+    shell turns inside out, the dense mesh around it is frozen and only the slabs it lies in run again - one
+    pass over the whole mesh took 96 s on Frieren (6.5M faces), and every such spot cost another."""
+    import os
+    import time
+    from concurrent.futures import ProcessPoolExecutor
+    from scipy.spatial import cKDTree
+    t0 = time.time()
+    n = min(16, os.cpu_count() or 4)
+    c = tris.mean(1)
+    ax = int(np.argmax(np.ptp(c, axis=0)))
+    sid = np.searchsorted(np.quantile(c[:, ax], np.linspace(0, 1, n + 1)[1:-1]), c[:, ax])
+    v, f = indexed(tris)
+    lo, hi = np.full(len(v), n), np.full(len(v), -1)
+    np.minimum.at(lo, f.ravel(), np.repeat(sid, 3))
+    np.maximum.at(hi, f.ravel(), np.repeat(sid, 3))
+    frozen = (lo != hi)[f].any(1)
+    signed = lambda t: np.einsum("ij,ij->i", t[:, 0], np.cross(t[:, 1], t[:, 2])).sum()
+    cavities = [(p.reshape(-1, 3).min(0), p.reshape(-1, 3).max(0)) for p in pieces(tris) if signed(p) < 0]
+    tree, results, todo, best = cKDTree(c), {}, list(range(n)), None
+    for k in range(passes):
+        jobs = [(tris[sid == i], frozen[sid == i], max(4, int(faces * (sid == i).mean()))) for i in todo]
+        with ProcessPoolExecutor(min(len(jobs), n)) as ex:
+            results.update(zip(todo, ex.map(_chunk_job, jobs)))
+        out = np.concatenate([results[i] for i in range(n)])
+        rv, rf = indexed(out)
+        bad = list(out[self_intersecting(rv, rf)])
+        bad += [p for p in pieces(out) if signed(p) < 0 and not any(((p.mean((0, 1)) >= a) & (p.mean((0, 1)) <= b)).all() for a, b in cavities)]
+        log(f"[organic] reduce (slabs) round {k}: {len(jobs)} slabs, {len(bad)} faces or shells to redo, {time.time() - t0:.0f} s")
+        if not bad:
+            return out
+        if best is None or len(bad) < best[0]:
+            best = (len(bad), out)
+        again = set()
+        for t in bad:
+            q = t.reshape(-1, 3)
+            r = np.linalg.norm(q - np.roll(q, 1, axis=0), axis=1).max()
+            ball = tree.query_ball_point(q.mean(0), max(min(3.0, r) * 2 ** k, np.ptp(q, axis=0).max()))
+            frozen[ball] = True
+            again.update(sid[ball].tolist())
+        todo = sorted(again)
+    log(f"[organic] reduce (slabs): {best[0]} faces or shells still cut through or turned after {passes} rounds; the next stage keeps them")
+    return best[1]
+
+
+def reduce_mesh(tris, faces, passes=12, safe=True, clean=True, frozen=None, shells=True):
     """Quadric decimation to about faces triangles that keeps a closed manifold one (MeshLab, preservetopology).
     ScanRuler's mesh.reduce is not used here: on a dense closed scan it leaves non-manifold edges.
     Decimation knows nothing of the other side of a thin wall (a hair tip, a finger on the staff): collapses
@@ -227,17 +320,25 @@ def reduce_mesh(tris, faces, passes=12, safe=True):
     import pymeshlab
     from scipy.spatial import cKDTree
     if safe and len(tris) > 6 * faces:      # in stages: what is kept out of the last one is then 3x coarser than the closing's cells
-        tris = reduce_mesh(tris, 3 * faces, passes)
+        tris = reduce_mesh(tris, 3 * faces, passes, clean=clean)
+        clean = False           # what that stage could not clean stays as it is here: only new cuts count
+    if safe and shells and frozen is None and len(tris) > 1_000_000:
+        return _reduce_chunked(tris, faces)
     v, f = indexed(tris)
     keep, tree, best = np.zeros(len(v), bool), cKDTree(v), None
+    if frozen is not None:          # faces kept as they are (a slab's border)
+        keep[f[frozen].ravel()] = True
     tries = np.zeros(len(v), int)          # how often a spot came back: its keep widens only there
     signed = lambda t: np.einsum("ij,ij->i", t[:, 0], np.cross(t[:, 1], t[:, 2])).sum()
-    cavities = [(p.reshape(-1, 3).min(0), p.reshape(-1, 3).max(0)) for p in pieces(tris) if signed(p) < 0]
+    cavities = [(p.reshape(-1, 3).min(0), p.reshape(-1, 3).max(0)) for p in pieces(tris) if signed(p) < 0] if shells else []
     # faces that already cut through each other (a print file's own) stay as they are: only new ones are bad
-    own = self_intersecting(v, f) if safe else np.zeros(len(f), bool)
+    # (clean: none to keep - a marching-cubes closing has none, and finding them on its millions of faces takes minutes)
+    own = self_intersecting(v, f) if safe and not clean else np.zeros(len(f), bool)
     keep[f[own].ravel()] = True
     inherited = {tuple(x) for x in v[keep]}
-    for _ in range(passes):
+    for k in range(passes):
+        if k:
+            print(f"[organic] reduce_mesh {len(f)} -> {faces}: pass {k + 1}", file=sys.stderr)
         ms = pymeshlab.MeshSet()
         ms.add_mesh(pymeshlab.Mesh(v, f, f_scalar_array=(~keep[f].any(1)).astype(float)))
         ms.compute_selection_by_condition_per_face(condselect="fq > 0.5")
@@ -250,7 +351,8 @@ def reduce_mesh(tris, faces, passes=12, safe=True):
             return out
         bad = [t for t in out[self_intersecting(rv, rf)] if not all(tuple(x) in inherited for x in t)]
         # a shell turned inside out: negative, and not where the dense mesh has a cavity
-        bad += [p for p in pieces(out) if signed(p) < 0 and not any(((p.mean((0, 1)) >= lo) & (p.mean((0, 1)) <= hi)).all() for lo, hi in cavities)]
+        if shells:
+            bad += [p for p in pieces(out) if signed(p) < 0 and not any(((p.mean((0, 1)) >= lo) & (p.mean((0, 1)) <= hi)).all() for lo, hi in cavities)]
         if not bad:
             return out
         if best is None or len(bad) < best[0]:

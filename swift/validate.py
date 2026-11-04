@@ -397,7 +397,31 @@ def tunnels(tris, closed_only=False):
     return max(0, (2 * shells - chi) // 2)
 
 
-def solid_gate(scan, bodies, grid, noise, points=3_000_000, seed=0, sheet=None):
+def _gate_scan(scan, grid, noise, points=3_000_000, seed=0, sheet=None, box=None):
+    """solid_gate's side of the scan, the same for every solid judged against it: sample points over the scan's
+    box (grown by a margin: solid grown past the scan is in it too), the scan's winding number and distance at
+    them, its thin surface and its own handles."""
+    import igl
+    from organic_solid import indexed as ix, plate_radius, sheet_faces
+    V, F = ix(scan)
+    if box is None:
+        pad = 2.0 + 0.02 * float(np.linalg.norm(np.ptp(V, axis=0)))
+        box = (V.min(0) - pad, V.max(0) + pad)
+    lo, hi = box
+    rng = np.random.default_rng(seed)
+    P = lo + rng.random((points, 3)) * (hi - lo)
+    thin = V[F][sheet_faces(V, F, grid) if sheet is None else sheet]
+    thin_mm2 = float(0.5 * np.linalg.norm(np.cross(thin[:, 1] - thin[:, 0], thin[:, 2] - thin[:, 0]), axis=1).sum())
+    S = sample_area(thin, int(min(300_000, max(1000, thin_mm2 / 0.04))), seed=seed)[0] if len(thin) else np.zeros((0, 3))   # 5 per mm2
+    w = igl.fast_winding_number(V, F, P)
+    d = np.sqrt(igl.point_mesh_squared_distance(P, V, F)[0])
+    band = max(2 * noise + 0.05, 1.5 * grid)
+    return dict(box=box, P=P, cell=float(np.prod(hi - lo)) / points, S=S, thin_mm2=thin_mm2,
+                held=(w > 0.8) & (d > band), out=(w < 0.2) & (d > plate_radius(grid) + band),
+                own=tunnels(scan, closed_only=True))       # the mesh's own handles (a lattice): no lace the closing made
+
+
+def solid_gate(scan, bodies, grid, noise, points=3_000_000, seed=0, sheet=None, pre=None):
     """What a slicer fills, against what the scan holds - the bodies exactly as written for it.
     - every body a closed shell facing out (a slicer drops an open or inside-out part: nothing printed there);
     - the scan's volume is solid: points clearly inside the scan (winding number) and away from its surface
@@ -405,20 +429,16 @@ def solid_gate(scan, bodies, grid, noise, points=3_000_000, seed=0, sheet=None):
       plate there) - lace or a void fails;
     - the solid stays in the scan: points clearly outside it, past a plate's half thickness from its
       surface, must be outside every body;
-    - tunnels: a thin surface closed as lace has hundreds."""
+    - tunnels: a thin surface closed as lace has hundreds.
+    pre: _gate_scan of this scan, kept from an earlier call (the reducer judges many solids against one scan)."""
     import igl
-    from organic_solid import indexed as ix, plate_radius, sheet_faces
-    V, F = ix(scan)
-    per, inside = [], None
-    every = np.concatenate([V] + [t.reshape(-1, 3) for _, t in bodies])     # solid grown past the scan is in the box too
-    lo, hi = every.min(0), every.max(0)
-    rng = np.random.default_rng(seed)
-    P = lo + rng.random((points, 3)) * (hi - lo)
-    cell = float(np.prod(hi - lo)) / points
-    thin = V[F][sheet_faces(V, F, grid) if sheet is None else sheet]
-    thin_mm2 = float(0.5 * np.linalg.norm(np.cross(thin[:, 1] - thin[:, 0], thin[:, 2] - thin[:, 0]), axis=1).sum())
-    S = sample_area(thin, int(min(300_000, max(1000, thin_mm2 / 0.04))), seed=seed)[0] if len(thin) else np.zeros((0, 3))   # 5 per mm2
-    in_p, in_s, holes = np.zeros(points, bool), np.zeros(len(S), bool), 0
+    from organic_solid import indexed as ix
+    every = np.concatenate([t.reshape(-1, 3) for _, t in bodies])
+    if pre is None or (every.min(0) < pre["box"][0]).any() or (every.max(0) > pre["box"][1]).any():
+        box = None if pre is None else (np.minimum(pre["box"][0], every.min(0)), np.maximum(pre["box"][1], every.max(0)))
+        pre = _gate_scan(scan, grid, noise, points, seed, sheet, box)
+    P, S, cell, own, per = pre["P"], pre["S"], pre["cell"], pre["own"], []
+    in_p, in_s, holes = np.zeros(len(P), bool), np.zeros(len(S), bool), 0
     for name, t in bodies:
         oe, nm = edge_counts(t)
         vol = volume(t)
@@ -429,22 +449,64 @@ def solid_gate(scan, bodies, grid, noise, points=3_000_000, seed=0, sheet=None):
         in_p |= igl.fast_winding_number(bv, bf, P) > 0.5
         if len(S):
             in_s |= igl.fast_winding_number(bv, bf, S) > 0.5
-    own = tunnels(scan, closed_only=True)       # the mesh's own handles (a lattice): no lace the closing made
-    w = igl.fast_winding_number(V, F, P)
-    d = np.sqrt(igl.point_mesh_squared_distance(P, V, F)[0])
-    band = max(2 * noise + 0.05, 1.5 * grid)
-    held = (w > 0.8) & (d > band)
+    held = pre["held"]
     missing = held & ~in_p
-    extra = (w < 0.2) & (d > plate_radius(grid) + band) & in_p
+    extra = pre["out"] & in_p
     scan_vol = max(float(held.sum()) * cell, 1e-9)
     r = dict(bodies=per, tunnels=int(holes), tunnels_allowed=150 + own, scan_volume_mm3=round(scan_vol, 1),
              missing_mm3=round(float(missing.sum()) * cell, 1), extra_mm3=round(float(extra.sum()) * cell, 1),
-             thin_surface_mm2=round(thin_mm2, 1),
+             thin_surface_mm2=round(pre['thin_mm2'], 1),
              thin_not_solid_share=round(float((~in_s).mean()) if len(S) else 0.0, 4))
+    r["_pre"] = pre
     r["checks"] = dict(bodies_closed=all(b["ok"] for b in per), volume_solid=r["missing_mm3"] <= 1e-3 * scan_vol,
                        stays_in_scan=r["extra_mm3"] <= 1e-3 * scan_vol, thin_surface_solid=r["thin_not_solid_share"] <= 0.01,
                        no_lace=holes <= 150 + own)      # Kurisu: 79 with its gear rings fused on, 1522 when closed as lace
     return r
+
+
+_SCAN = {}
+
+
+def _scan_side(inp, repaired, closed, grid, max_points):
+    """validate_organic's side of the original mesh and the repaired scan, the same for every solid judged
+    against them (the reducer's trials, the final check): kept for the last files seen, by path and mtime."""
+    import os
+    import igl
+    from organic_solid import already_solid, indexed as ix, sheet_faces
+    key = tuple((str(p), os.stat(p).st_mtime_ns, os.stat(p).st_size) if p else None for p in (inp, repaired, closed)) + (grid, max_points)
+    if key in _SCAN:
+        return _SCAN[key]
+    _SCAN.clear()
+    A, R0 = read_stl(inp), read_stl(repaired)
+    size = float(np.linalg.norm(np.ptp(A.reshape(-1, 3), axis=0)))
+    spacing = max(0.1, size / 600)
+    # a closed manifold mesh is a model as given (a print file, a lattice), not raw scan: it has no noise to allow -
+    # its plane residual is the curvature of thin struts (a Voronoi car: 0.33 mm, loose enough to smear them)
+    noise = 0.0 if edge_counts(A) == (0, 0) else estimate_noise(A, 0.3)     # 1.5 mm patches: wider ones measure a figurine's curvature, not its noise
+    area = lambda T: float(0.5 * np.linalg.norm(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), axis=1).sum())
+    count = lambda T: int(min(max_points, max(1000, area(T) / spacing ** 2)))
+    # a repaired triangle is the scan's own when the scan has that very triangle (filling adds new ones)
+    q = np.round(np.concatenate([A.reshape(-1, 3), R0.reshape(-1, 3)]) * 1e4).astype(np.int64)
+    _, inv = np.unique(q, axis=0, return_inverse=True)
+    _, k = np.unique(np.sort(inv.ravel().reshape(-1, 3), axis=1), axis=0, return_inverse=True)
+    k = k.ravel()
+    own, kept = np.isin(k[len(A):], k[:len(A)]), np.isin(k[:len(A)], k[len(A):])
+    pr, tr = sample_area(R0, count(R0))
+    scanned = own[tr]
+    bounding = enclosing(R0, pr, eps=max(0.05, 2 * noise))
+    c = dict(A=A, R0=R0, noise=noise, spacing=spacing, own=own, kept=kept, pr=pr, tr=tr, scanned=scanned, bounding=bounding,
+             pa=pr[scanned & bounding], area=area, count=count, toA=MeshDistance(A, spacing), near=MeshDistance(R0, spacing),
+             bridged_mm2=0.0, gap=None, gap_tree=None, g=grid or spacing, gate=None)
+    if closed is not None:
+        C = read_stl(closed)
+        v, f = ix(R0)
+        gap = igl.signed_distance(C.mean(1), v, f, igl.SignedDistanceType.SIGNED_DISTANCE_TYPE_UNSIGNED)[0] > grid
+        c.update(bridged_mm2=area(C[gap]), gap=gap, gap_tree=cKDTree(C.mean(1)))
+    # a scan that is a closed solid already was delivered as it is: a thin wall of it bounds volume, no open
+    # sheet to plate (judged as one, its own surface points sit at winding number 1/2 and flicker)
+    c["sheet"] = np.zeros(len(R0), bool) if already_solid(R0) else sheet_faces(*ix(R0), c["g"])
+    _SCAN[key] = c
+    return c
 
 
 def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed=None, grid=None, bodies=None):
@@ -457,40 +519,18 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
     (closed: the unreduced closed mesh, grid: its step): marching cubes on a distance field lays surface
     within a fraction of a cell of the scan wherever there is scan, so closed surface over a cell from it
     spans a gap with no scan in it - a crevice's mouth, the gap between two scan layers - like a filled hole."""
-    A, R0, R = read_stl(inp), read_stl(repaired), read_stl(reduced)
-    size = float(np.linalg.norm(np.ptp(A.reshape(-1, 3), axis=0)))
-    spacing = max(0.1, size / 600)
-    # a closed manifold mesh is a model as given (a print file, a lattice), not raw scan: it has no noise to allow -
-    # its plane residual is the curvature of thin struts (a Voronoi car: 0.33 mm, loose enough to smear them)
-    noise = 0.0 if edge_counts(A) == (0, 0) else estimate_noise(A, 0.3)     # 1.5 mm patches: wider ones measure a figurine's curvature, not its noise
-    area = lambda T: float(0.5 * np.linalg.norm(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), axis=1).sum())
-    count = lambda T: int(min(max_points, max(1000, area(T) / spacing ** 2)))
-    # a repaired triangle is the scan's own when the scan has that very triangle (filling adds new ones)
-    q = np.round(np.concatenate([A.reshape(-1, 3), R0.reshape(-1, 3)]) * 1e4).astype(np.int64)
-    _, inv = np.unique(q, axis=0, return_inverse=True)
-    _, key = np.unique(np.sort(inv.ravel().reshape(-1, 3), axis=1), axis=0, return_inverse=True)
-    key = key.ravel()
-    own, kept = np.isin(key[len(A):], key[:len(A)]), np.isin(key[:len(A)], key[len(A):])
-
-    pr, tr = sample_area(R0, count(R0))
-    scanned = own[tr]
-    bounding = enclosing(R0, pr, eps=max(0.05, 2 * noise))
-    pa = pr[scanned & bounding]
+    R = read_stl(reduced)
+    c = _scan_side(inp, repaired, closed, grid, max_points)
+    A, R0, noise, spacing, own, kept, pr, tr, scanned, bounding, pa, area, count = (c[k] for k in (
+        "A", "R0", "noise", "spacing", "own", "kept", "pr", "tr", "scanned", "bounding", "pa", "area", "count"))
     d_ar, sg_ar = MeshDistance(R, spacing)(pa)
     pb, _ = sample_area(R, count(R), seed=2)
-    d_ra, sg = MeshDistance(A, spacing)(pb)
-    near = MeshDistance(R0, spacing)
-    near(pb)
-    supported = own[near.last_tri]                          # over scan surface, not over a filled hole
-    bridged_mm2 = 0.0
-    if closed is not None:
-        import igl
-        C = read_stl(closed)
-        v, inv = np.unique(R0.reshape(-1, 3), axis=0, return_inverse=True)
-        gap = igl.signed_distance(C.mean(1), v, inv.reshape(-1, 3).astype(np.int64), igl.SignedDistanceType.SIGNED_DISTANCE_TYPE_UNSIGNED)[0] > grid
-        bridged_mm2 = area(C[gap])
-        on_gap = gap[cKDTree(C.mean(1)).query(pb)[1]]
-        supported &= ~on_gap
+    d_ra, sg = c["toA"](pb)
+    c["near"](pb)
+    supported = own[c["near"].last_tri]                     # over scan surface, not over a filled hole
+    bridged_mm2 = c["bridged_mm2"]
+    if c["gap"] is not None:
+        supported &= ~c["gap"][c["gap_tree"].query(pb)[1]]
     open_e, nonman = edge_counts(R)
     tolr = dict(rms=max(tol, 1.25 * noise + 0.01), p95=2.5 * noise + 0.02, p99=3.5 * noise + 0.03, max=8 * noise + 0.2,
                 vol=None, dim=None, face_p95=None)
@@ -504,11 +544,8 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
     # flap) lies within it by design, up to the plate's half thickness under the solid's face, as the solid
     # gate allows plates outside the scan: reported, not measured. Off the plate (outside the solid, deeper
     # in) it counts
-    from organic_solid import already_solid, indexed as ix, plate_radius, sheet_faces
-    g = grid or spacing
-    # a scan that is a closed solid already was delivered as it is: a thin wall of it bounds volume, no open
-    # sheet to plate (judged as one, its own surface points sit at winding number 1/2 and flicker)
-    sheet = np.zeros(len(R0), bool) if already_solid(R0) else sheet_faces(*ix(R0), g)
+    from organic_solid import plate_radius
+    g, sheet = c["g"], c["sheet"]
     plated = sheet[tr][scanned & bounding] & (sg_ar < 0) & (d_ar <= plate_radius(g) + tolr["p99"]) & ~buried
     plated_mm2 = float(plated.sum() * per_a)
     pa, d_ar, sg_ar = pa[~buried & ~plated], d_ar[~buried & ~plated], sg_ar[~buried & ~plated]
@@ -534,7 +571,8 @@ def validate_organic(inp, repaired, reduced, tol=0.1, max_points=300_000, closed
     lost.sort(key=lambda c: -c["area_mm2"])
     detail_band = max(1.0, 1e-4 * measured_a)
     # the bodies as written for the slicer, against the scan's volume (solid_gate)
-    gate = solid_gate(R0, bodies or [("solid", R)], g, noise, sheet=sheet)
+    gate = solid_gate(R0, bodies or [("solid", R)], g, noise, sheet=sheet, pre=c["gate"])
+    c["gate"] = gate.pop("_pre")
     checks = {
         "closed": open_e == 0 and nonman == 0,
         "rms": max(s_ar["rms"], s_ba["rms"]) <= tolr["rms"],

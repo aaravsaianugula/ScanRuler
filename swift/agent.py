@@ -163,9 +163,20 @@ def est(m):
     return (n + len(json.dumps(m.get("tool_calls", "")))) // 3.5
 
 
+def available(timeout=4):
+    """Swift is there to ask: the Gateway answers and serves its model (a run without it goes on deterministic)."""
+    try:
+        with urllib.request.urlopen(f"{GATEWAY}/models", timeout=timeout) as r:
+            return MODEL in [m.get("id") for m in json.loads(r.read()).get("data", [])]
+    except Exception:
+        return False
+
+
 class Agent:
-    def __init__(self, wb: Workbench, mode, log=print, max_turns=60, emit=None):
+    def __init__(self, wb: Workbench, mode, log=print, max_turns=60, emit=None, deadline=None, review=False):
         self.wb, self.mode, self.log, self.max_turns = wb, mode, log, max_turns
+        self.deadline = deadline    # time.time() past which no new turn starts
+        self.review = review        # the solid is built: bodies and names only, no organic_route
         self.emit = emit or (lambda *a, **k: None)     # the desktop app's event stream
         self.tools = COMMON + (CAD_TOOLS if mode == "cad" else SCAN_TOOLS)
         self.changes = 0            # bumped by anything that may change the model
@@ -251,6 +262,8 @@ class Agent:
         return self.wb.script(name, args)       # scripts write step files; the model changes on rebuild
 
     def t_organic_route(self, reason, max_triangles=150000):
+        if self.review:
+            return "refused: the solid is built and validated already; judge the bodies (group_bodies), check, finish"
         self.log(f"[swift] organic route: {reason}")
         self.emit("phase", phase="organic", label="Repairing the scan into a solid")
         self.emit("mode", mode="organic")
@@ -346,10 +359,13 @@ class Agent:
         return on_delta
 
     def run(self, first_message):
-        sys_prompt = (PROMPTS / f"{self.mode}.md").read_text(encoding="utf-8")
+        sys_prompt = (PROMPTS / f"{'cad' if self.mode == 'cad' else 'scan'}.md").read_text(encoding="utf-8")   # organic is a scan's route
         msgs = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": first_message}]
         for turn in range(self.max_turns):
             self.turn = turn
+            if self.deadline and time.time() > self.deadline:
+                self.log(f"[swift] time budget spent after {turn} turns")
+                return "time budget spent", True
             self.compact(msgs)
             self.emit("turn", n=turn, max=self.max_turns, context=int(sum(est(m) for m in msgs)), limit=CTX_TOKENS)
             stream = self._stream()

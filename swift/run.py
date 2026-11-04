@@ -25,9 +25,9 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agent import MODEL, Agent  # noqa: E402
+from agent import MODEL, Agent, available  # noqa: E402
 from autopilot import first_pass  # noqa: E402
-from validate import summary  # noqa: E402
+from validate import read_stl, summary  # noqa: E402
 from workbench import Workbench, clip  # noqa: E402
 
 # module: pip package, for every route (the organic fallback closes any mesh: igl, pymeshlab; mech: OCP; bodies: manifold3d)
@@ -73,6 +73,8 @@ def surface_shares(stl, samples=40000, candidates=1500, deg=8):
     return float(planes), float((np.abs(c @ s.T) < np.sin(np.radians(deg))).mean(1).max()), flat
 
 
+SWIFT_BUDGET = 13 * 60   # s from the start a review ends by (3 minutes at least); a repair gets 10 minutes at least
+SCAN_BUDGET = 25 * 60    # s from the start a feature rebuild of a scan stops by, for the organic fallback
 BAMBU_FACES = 5000      # a STEP Bambu Studio opens in about a minute
 # Bambu Studio meshes a STEP at 0.003 mm (its default): a few hundred triangles per B-spline span however small,
 # so a surfaced figurine's thousands of patches come to millions (Kurisu, 9.4k patches: 34M) - past this, the 3MF
@@ -89,14 +91,66 @@ def organic_autopilot(wb, phase, log, emit):
     if getattr(wb, "whole", None):          # bodies without Swift: pieces and rings, what shape says for sure
         phase("bodies", "Finding the bodies")
         try:
-            log(wb.auto_bodies())
+            wb.bodies_text = wb.auto_bodies()
+            log(wb.bodies_text)
         except Exception:       # finding bodies never costs the delivery: the solid stays one body
             log("[run] finding the bodies failed, the solid stays one body:\n" + traceback.format_exc())
+    import_ahead(wb)
     phase("check", "Validating the solid against the scan")
     check = wb.check("organic")
     log(check)
     emit("validation", result=wb.last_validation, summary=check)
     return wb.last_validation is None or wb.last_validation["verdict"] != "PASS"
+
+
+def import_check(step):
+    """The STEP read as Bambu Studio reads it. Past BAMBU_FACES, or smooth B-spline surfaces of a scanned shape (a
+    slicer meshes those at 0.003 mm: tens of millions of triangles, measured), it goes to the slicer as the 3MF
+    anyway: read with a coarse mesh, not Bambu's."""
+    from step_faceted import check_import
+    text = Path(step).read_text(encoding="ascii", errors="ignore")
+    many = text.count("ADVANCED_FACE(") > BAMBU_FACES or "B_SPLINE_SURFACE" in text
+    imported = check_import(step, deflection=0.1 if many else 0.003)
+    if many and imported:
+        imported["triangles"], imported["heavy"] = None, True
+    return imported
+
+
+def import_ahead(wb):
+    """The import check of the STEP as it stands, started in another process while the run validates: used at
+    the end when the STEP is still that file (a minute saved), else it is read again."""
+    from concurrent.futures import ProcessPoolExecutor
+    step = getattr(wb, "organic_step", None)
+    if step and step.exists():
+        pool = ProcessPoolExecutor(1)
+        wb.import_ahead = ((step, step.stat().st_mtime_ns), pool.submit(import_check, step))
+        pool.shutdown(wait=False)
+
+
+def swift_needed(wb, failed):
+    """What, if anything, the autopilot's organic result needs Swift for: a solid that failed the validator, or
+    bodies to judge by looking (several, or a rod whose head the finders could not tell). One clean body: nothing."""
+    r = wb.last_validation
+    if failed:
+        return "repair", ("the validator FAILS (" + ", ".join(k for k, v in r["checks"].items() if not v) + ")") if r else "no solid was checked"
+    unsure = [hd["at"] for rd in getattr(wb, "rods", None) or [] for hd in rd.get("heads", []) if not hd["clean"]]
+    n = len(getattr(wb, "bodies", None) or [])
+    if n > 1 or unsure:
+        return "review", f"{n} bodies to name and check" + (f", rod heads to judge at {unsure}" if unsure else "")
+    return None, "one clean body, nothing to judge"
+
+
+def restore_autopilot(wb, proposal, log):
+    """Back to the autopilot's bodies and their check (Swift's change did not pass, or ran out of time)."""
+    try:
+        if not proposal:
+            raise ValueError("no proposal")
+        log(wb.group_bodies(proposal["groups"], (), "nearest", proposal["cuts"]))
+    except Exception:       # no proposal, or a solid Swift rebuilt that its pieces no longer fit: one body
+        wb.whole, wb.pieces = wb.reduced, None
+        wb.delivered = [(wb.stl.stem, read_stl(wb.reduced))]
+        wb._bodies(wb.delivered, [], [])
+    log(wb.check("organic"))
 
 
 def main():
@@ -105,7 +159,7 @@ def main():
     ap.add_argument("--mode", choices=["auto", "cad", "scan", "organic"], default="auto")
     ap.add_argument("--work")
     ap.add_argument("--max-turns", type=int, default=60)
-    ap.add_argument("--no-swift", action="store_true", help="deterministic pass only (CAD meshes)")
+    ap.add_argument("--no-swift", action="store_true", help="never ask Swift (by default it is asked only for what the deterministic routes leave: a failed check, bodies to judge, a scan to rebuild)")
     ap.add_argument("--headless-browser", action="store_true", help="scan mode: do not show the ScanRuler window")
     ap.add_argument("--live", action="store_true", help="hand the ScanRuler page to the host (desktop app) as the live view")
     ap.add_argument("--events", action="store_true", help="JSON lines on stdout for the desktop app")
@@ -181,6 +235,9 @@ def main():
         log(f"[run] mode: {mode}")
         failed, agent = not mech_step, None
         paged, tried_organic = a.live, False
+        swift_ok = not a.no_swift and available()
+        if not a.no_swift and not swift_ok:
+            log(f"[run] the Gateway does not serve {MODEL}: deterministic routes only")
 
         if mech_step:
             pass
@@ -193,7 +250,7 @@ def main():
             emit("validation", result=wb.last_validation, summary=check)
             failed = wb.last_validation is None or wb.last_validation["verdict"] != "PASS"
             report = f"Deterministic exact-reading pass: {', '.join(files)}."
-            if failed and not a.no_swift:
+            if failed and swift_ok:
                 phase("swift", "Swift is repairing what failed")
                 wb.narrate = False
                 agent = Agent(wb, "cad", log=log, max_turns=a.max_turns, emit=emit)
@@ -201,14 +258,49 @@ def main():
                        f"{files} (main axis {wb.main_axis}, body \"{wb.body}\") and the validator says:\n{clip(agent.t_check(), 6000)}\n\n"
                        "Fix it until the validator passes.")
                 report, failed = agent.run(msg)
-        elif mode == "organic" and (a.no_swift or a.mode == "organic"):
+        elif mode == "organic":
+            # deterministic first, always; Swift only for what the result needs (a repair, bodies to judge by looking)
             if not a.live:
                 wb.close()
                 wb = Workbench(stl, work, page=True, show_browser=not a.headless_browser)
+            paged = True
             wb.emit, wb.narrate = emit, True
             failed, tried_organic = organic_autopilot(wb, phase, log, emit), True
             report = ORGANIC_REPORT
-        elif a.no_swift:
+            need, why = swift_needed(wb, failed)
+            log(f"[run] Swift: {why}" + ("" if need else ", none needed"))
+            if need and not swift_ok:
+                log("[run] Swift is off or the Gateway does not answer: the autopilot's result stands")
+            elif need:
+                phase("swift", "Swift is judging the bodies" if need == "review" else "Swift is repairing what failed")
+                wb.narrate = False
+                # bounded: a review is a few turns, a repair more; neither pushes the run far past its budget
+                left = SWIFT_BUDGET - (time.time() - t0)
+                agent = Agent(wb, "organic", log=log, max_turns=12 if need == "review" else 30, emit=emit,
+                              deadline=time.time() + (max(180, left) if need == "review" else max(600, left)), review=need == "review")
+                agent.passed, agent.checked_at = not failed, agent.changes
+                auto = dict(wb.proposal) if getattr(wb, "proposal", None) else None
+                if need == "review":
+                    msg = (f"Scan: {stl.name}. The autopilot already closed it into a solid and the validator PASSES. The part finders "
+                           f"made these bodies:\n{clip(getattr(wb, 'bodies_text', ''), 5000)}\n\nLook at bodies.png (view_image). Name every "
+                           "body for what it is; change a group or cut only where the picture clearly shows it wrong (a part split between "
+                           "bodies, a cut through the wrong thing) - the finders are usually right. Then call group_bodies once with the call "
+                           "above edited (new names at least), check, finish. Do not call organic_route: the solid is done.")
+                else:
+                    msg = (f"Scan: {stl.name}, opened in ScanRuler (millimetres). {analysis.splitlines()[0]}: classified organic. The "
+                           f"autopilot ran organic_route and the finders' bodies, and {why}:\n"
+                           f"{clip(summary(wb.last_validation), 4000) if wb.last_validation else ''}\n\nBodies so far:\n"
+                           f"{clip(getattr(wb, 'bodies_text', ''), 3000)}\n\nFix what fails (group_bodies, body_pieces, or scanruler mesh "
+                           "tools then organic_route again), check, finish.")
+                sreport, sfailed = agent.run(msg)
+                if sfailed or not agent.passed:
+                    log("[run] Swift's change did not pass: back to the autopilot's bodies")
+                    restore_autopilot(wb, auto, log)
+                    failed = wb.last_validation is None or wb.last_validation["verdict"] != "PASS"
+                else:
+                    failed, report = False, ORGANIC_REPORT + f"\n\nSwift ({why}):\n{sreport}"
+                emit("validation", result=wb.last_validation, summary=summary(wb.last_validation) if wb.last_validation else "")
+        elif not swift_ok:
             report = "Without Swift, a scan is not read into features: the exact-reading pass works on CAD-exported meshes only."
             log(f"[run] {report}")
         else:
@@ -218,7 +310,7 @@ def main():
                 paged = True
             wb.emit, wb.narrate = emit, False
             phase("swift", "Swift is reverse-engineering the scan")
-            agent = Agent(wb, "scan", log=log, max_turns=a.max_turns, emit=emit)
+            agent = Agent(wb, "scan", log=log, max_turns=a.max_turns, emit=emit, deadline=t0 + SCAN_BUDGET)
             msg = (f"Scan: {stl.name}, opened in ScanRuler (millimetres).\n{chr(10).join(analysis.splitlines()[1:4])}\n\n"
                    "Start with the guide index, then work the scan-to-cad flow until the validator passes.")
             if mode == "organic":
@@ -279,15 +371,8 @@ def main():
         if step.exists():
             phase("import", "Opening the STEP the way Bambu Studio does")
             try:
-                from step_faceted import check_import
-                # past BAMBU_FACES, or smooth B-spline surfaces of a scanned shape (a slicer meshes those at 0.003 mm:
-                # tens of millions of triangles, measured), it goes to the slicer as the 3MF anyway: read it with a
-                # coarse mesh, not Bambu's
-                text = step.read_text(encoding="ascii", errors="ignore")
-                many = text.count("ADVANCED_FACE(") > BAMBU_FACES or "B_SPLINE_SURFACE" in text
-                imported = check_import(step, deflection=0.1 if many else 0.003)
-                if many:
-                    imported["triangles"], imported["heavy"] = None, True
+                ahead = getattr(wb, "import_ahead", None)
+                imported = ahead[1].result() if ahead and ahead[0] == (step, step.stat().st_mtime_ns) else import_check(step)
             except Exception:
                 log("[run] the import check failed:\n" + traceback.format_exc())
             log(f"[run] STEP import check: {imported}")
